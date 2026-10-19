@@ -2,28 +2,30 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QSpacerItem, QSizePolicy, QFrame
 )
-from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import pyqtSignal
 
+# \U0001F514 = U+1F514 BELL EMOJI (8-digit escape required for non-BMP chars).
+# The earlier ὑ4 was wrong: \u only reads 4 hex digits, giving U+1F51
+# (Greek letter) followed by the literal character '4'.
 NAV_ITEMS = [
     ("MONITORING", [
-        ("dashboard",         "▣  Dashboard"),
-        ("live_view",         "▶  Live View"),
+        ("dashboard",       "▣  Dashboard"),
+        ("live_view",       "▶  Live View"),
     ]),
     ("DEVICES", [
-        ("cameras",           "●  Camera Management"),
-        ("nvr",               "▦  NVR / DVR"),
+        ("cameras",         "●  Camera Management"),
+        ("nvr",             "▦  NVR / DVR"),
     ]),
     ("AI FEATURES", [
-        ("face_enrollment",   "☺  Face Enrollment"),
-        ("attendance",        "□  Attendance"),
-        ("expression",        "☻  Expression Monitor"),
-        ("safety",            "⚠  Safety Watch"),
+        ("face_enrollment", "☺  Face Enrollment"),
+        ("attendance",      "□  Attendance"),
+        ("expression",      "☻  Expression Monitor"),
+        ("safety",          "⚠  Safety Watch"),
     ]),
     ("SYSTEM", [
-        ("recordings",        "●  Recordings"),
-        ("alerts",            "ὑ4  Alerts"),
-        ("settings",          "⚙  Settings"),
+        ("recordings",      "●  Recordings"),
+        ("alerts",          "\U0001F514  Alerts"),   # fixed: was ὑ4
+        ("settings",        "⚙  Settings"),
     ]),
 ]
 
@@ -35,7 +37,6 @@ class Sidebar(QWidget):
         super().__init__(parent)
         self.setObjectName("sidebar")
         self._buttons: dict[str, QPushButton] = {}
-        self._current = ""
         self._build_ui()
 
     def _build_ui(self):
@@ -43,7 +44,6 @@ class Sidebar(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Logo
         logo_area = QWidget()
         logo_area.setObjectName("logo_area")
         la = QVBoxLayout(logo_area)
@@ -61,7 +61,6 @@ class Sidebar(QWidget):
         sep.setStyleSheet("color: #252550;")
         layout.addWidget(sep)
 
-        # Nav sections
         for section_title, items in NAV_ITEMS:
             lbl = QLabel(section_title)
             lbl.setObjectName("nav_section_label")
@@ -76,10 +75,10 @@ class Sidebar(QWidget):
                 layout.addWidget(btn)
 
         layout.addSpacerItem(
-            QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+            QSpacerItem(0, 0, QSizePolicy.Policy.Minimum,
+                        QSizePolicy.Policy.Expanding)
         )
 
-        # Camera count badge area
         badge_row = QHBoxLayout()
         badge_row.setContentsMargins(16, 8, 16, 16)
         self._cam_label = QLabel("Active Cameras")
@@ -94,7 +93,6 @@ class Sidebar(QWidget):
     def _on_nav(self, key: str):
         for k, btn in self._buttons.items():
             btn.setChecked(k == key)
-        self._current = key
         self.page_changed.emit(key)
 
     def set_active(self, key: str):

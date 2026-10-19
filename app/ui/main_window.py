@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
-    QStatusBar, QLabel, QSplitter, QMessageBox
+    QStatusBar, QLabel
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent
@@ -35,7 +35,6 @@ class MainWindow(QMainWindow):
         self.resize(1440, 860)
         self.setStyleSheet(DARK)
 
-        # Shared services
         self.stream_mgr = StreamManager()
         self.face_engine = FaceEngine(Config.FACES_DIR)
         self.recorder = Recorder()
@@ -46,7 +45,6 @@ class MainWindow(QMainWindow):
         self._load_data()
         self._sidebar.set_active("dashboard")
 
-    # ----------------------------------------------------------------- build
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -60,9 +58,6 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         main_layout.addWidget(self._stack)
 
-        # Instantiate pages
-        self._pages = {}
-
         self._p_dashboard = Dashboard(self.db)
         self._p_live      = LiveView(self.db, self.stream_mgr, self.recorder)
         self._p_cameras   = CameraManagement(self.db)
@@ -75,6 +70,7 @@ class MainWindow(QMainWindow):
         self._p_rec       = RecordingsPage()
         self._p_settings  = SettingsPage()
 
+        self._pages = {}
         for key, page in [
             ("dashboard",       self._p_dashboard),
             ("live_view",       self._p_live),
@@ -91,10 +87,9 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(page)
             self._pages[key] = page
 
-        # Status bar
-        self._sb_cams  = QLabel("Cameras: 0")
-        self._sb_live  = QLabel("Streams: 0")
-        self._sb_time  = QLabel()
+        self._sb_cams = QLabel("Cameras: 0")
+        self._sb_live = QLabel("Streams: 0")
+        self._sb_time = QLabel()
         sb = QStatusBar()
         sb.addWidget(self._sb_cams)
         sb.addWidget(QLabel(" | "))
@@ -106,15 +101,23 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self._sidebar.page_changed.connect(self._navigate)
         self._p_live.active_count_changed.connect(self._on_stream_count)
-        self._p_cameras.refresh  # triggered internally after add/edit/del
+
+        # Forward raw BGR frames from live streams to both AI pages.
+        # ExpressionMonitor and SafetyWatch store the latest frame and
+        # process it on their own QTimer cadence.
+        self._p_live.raw_frame_received.connect(self._p_expr.receive_frame)
+        self._p_live.raw_frame_received.connect(self._p_safety.receive_frame)
+
+        # When cameras are added / edited / deleted, reload everything
+        # that holds a camera list: live view grid, AI page selectors,
+        # sidebar badge, status bar count.
+        self._p_cameras.cameras_changed.connect(self._load_data)
 
     def _navigate(self, key: str):
         page = self._pages.get(key)
         if page:
             self._stack.setCurrentWidget(page)
-            if key == "live_view":
-                self._refresh_live_view()
-            elif key == "expression":
+            if key == "expression":
                 self._p_expr.set_cameras(self._get_cameras())
             elif key == "safety":
                 self._p_safety.set_cameras(self._get_cameras())
@@ -127,10 +130,6 @@ class MainWindow(QMainWindow):
         total = len(cameras)
         self._sidebar.update_camera_count(total)
         self._sb_cams.setText(f"Cameras: {total}")
-
-    def _refresh_live_view(self):
-        cameras = self._get_cameras()
-        self._p_live.load_cameras(cameras)
 
     def _get_cameras(self):
         from app.core.camera_manager import CameraManager

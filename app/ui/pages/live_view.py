@@ -1,6 +1,8 @@
+import cv2
+import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QComboBox, QSizePolicy
+    QLabel, QComboBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from app.ui.widgets.camera_grid import CameraGrid
@@ -8,12 +10,14 @@ from app.core.stream_manager import StreamManager
 from app.core.recording import Recorder
 from app.config import Config
 from typing import List, Dict
-import cv2, os
 from datetime import datetime
 
 
 class LiveView(QWidget):
     active_count_changed = pyqtSignal(int)
+    # Emits (camera_id, np.ndarray) for every decoded frame so AI pages
+    # (ExpressionMonitor, SafetyWatch, AttendanceEngine) can consume it.
+    raw_frame_received = pyqtSignal(int, object)
 
     def __init__(self, db, stream_manager: StreamManager, recorder: Recorder,
                  parent=None):
@@ -29,7 +33,6 @@ class LiveView(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        # Toolbar
         toolbar = QHBoxLayout()
         title = QLabel("Live View")
         title.setObjectName("page_title")
@@ -40,7 +43,7 @@ class LiveView(QWidget):
         self._layout_cb = QComboBox()
         for r, c in Config.GRID_LAYOUTS:
             self._layout_cb.addItem(f"{r}x{c}", (r, c))
-        self._layout_cb.setCurrentIndex(1)  # 2x2 default
+        self._layout_cb.setCurrentIndex(1)
         self._layout_cb.currentIndexChanged.connect(self._on_layout_change)
         toolbar.addWidget(self._layout_cb)
 
@@ -69,11 +72,19 @@ class LiveView(QWidget):
 
     def start_all_streams(self):
         for cam in self._cameras:
-            if not self.sm.is_streaming(cam["id"]) and cam.get("rtsp_url"):
+            cid = cam["id"]
+            if not self.sm.is_streaming(cid) and cam.get("rtsp_url"):
                 self.sm.start_stream(
-                    cam["id"], cam["rtsp_url"],
-                    on_frame=lambda cid, img: self._grid.update_frame(cid, img),
-                    on_status=lambda cid, ok, msg: self._on_status(cid, ok, msg),
+                    cid,
+                    cam["rtsp_url"],
+                    on_frame=lambda _id, img, c=cid:
+                        self._grid.update_frame(c, img),
+                    on_status=lambda _id, ok, msg, c=cid:
+                        self._on_status(c, ok, msg),
+                    # Forward raw BGR frames to AI pages via Qt signal.
+                    # The lambda captures cid so each camera routes correctly.
+                    on_raw=lambda _id, frame, c=cid:
+                        self.raw_frame_received.emit(c, frame),
                 )
         self.active_count_changed.emit(
             sum(1 for c in self._cameras if self.sm.is_streaming(c["id"]))
@@ -94,5 +105,7 @@ class LiveView(QWidget):
         frame = StreamManager.snapshot(cam["rtsp_url"])
         if frame is not None:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(Config.SNAPSHOTS_DIR, f"snap_{camera_id}_{ts}.jpg")
+            path = os.path.join(
+                Config.SNAPSHOTS_DIR, f"snap_{camera_id}_{ts}.jpg"
+            )
             cv2.imwrite(path, frame)
