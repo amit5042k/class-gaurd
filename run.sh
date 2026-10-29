@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
-echo "Starting ClassGuard Camera Management System..."
-python3 main.py
+cd "$(dirname "$0")"
+[ -f .venv/bin/activate ] && . .venv/bin/activate
+exec python3 main.py

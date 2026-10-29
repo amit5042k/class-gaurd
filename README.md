@@ -1,181 +1,125 @@
 # ClassGuard — Camera Management Desktop App
 
-A full-featured desktop application similar to Hikvision iVMS, built with Python + PyQt6.
+A desktop app similar to Hikvision iVMS, built with Python + PyQt6. It shows cameras from
+several brands on one screen and adds face-recognition attendance, emotion monitoring and
+safety alerts on top of the video.
 
 ## Features
 
-| Module | Description |
+| Module | What it does |
 |---|---|
-| **Camera Management** | Add/edit/delete IP cameras from Hikvision, Dahua, UNV, CP Plus, ONVIF, or any RTSP source. Wired & wireless. |
-| **NVR / DVR Management** | Register NVRs and DVRs; link cameras to channels. |
-| **Live View** | Multi-layout grid (1×1 to 4×4), RTSP streaming with auto-reconnect. |
-| **Face Enrollment** | Enroll persons via webcam capture or image file. Stores 128-D face embeddings. |
-| **Attendance** | Real-time check-in / check-out via face recognition. CSV export. |
-| **Expression Monitor** | Live emotion analysis (happy, sad, angry, fear, surprise, disgust, neutral) with per-emotion progress bars. |
-| **Safety Watch** | Person detection with HOG, optional YOLO model for PPE violation detection (helmet, mask, vest). Configurable restricted zones. |
-| **Alerts** | Severity-tagged alert log with acknowledge workflow. |
-| **Recordings** | Per-camera video recording to local MP4 files. |
-| **Settings** | Tune thresholds, reconnect delays, recording FPS. |
+| **Camera Management** | Add/edit/delete cameras from Hikvision, Dahua, UNV, CP Plus, ONVIF or any RTSP source (wired, PoE or Wi-Fi). Main or sub-stream, background connection test, ONVIF network scan with one-click add. |
+| **Live View** | Grids from 1×1 to 4×4, auto-reconnect with back-off, snapshots. |
+| **Face Enrollment** | People with ID/class/department; enroll several photos per person from a webcam or photo file. |
+| **Attendance** | Automatic from live video on cameras with *Attendance Tracking* on. One record per person per day: check-in = first seen, last seen = check-out. Present / Late / Absent, weekly off days, daily and monthly CSV export. |
+| **Expression Monitor** | Live emotion labels and chart for a camera (needs DeepFace). Logs to the database; alerts on angry / fear / disgust. |
+| **Safety Watch** | Person detection; optional YOLO model (ONNX or Darknet) for PPE violations (`no_helmet`, `NO-Hardhat`, …). Draw restricted zones on the picture; anyone whose feet are inside raises a high-priority alert. |
+| **Alerts** | Created automatically with a snapshot photo and a cooldown (no alert floods). High-priority alerts pop up with a sound. |
+| **Settings** | Saved to disk: shift start, late grace, weekly off days, match threshold, alert options, auto-start streams. |
+
+All AI runs on one background thread that always analyses the newest frame of each camera,
+so the window never freezes. Which analyses run on a camera is set by its AI switches in
+*Camera Management* (or by the Expression / Safety page while it is monitoring that camera).
+
+Recording/playback, PTZ controls and NVR channel import are not built yet (roadmap phase 3).
 
 ---
 
-## Requirements
+## Install
 
-- Python 3.9+
-- OS: Windows 10/11, macOS 12+, Ubuntu 20.04+
-
-## Quick Install
+Needs **Python 3.9–3.12** (64-bit) on Windows 10/11, macOS 12+ or Ubuntu 20.04+.
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/amit5042k/class-gaurd.git
 cd class-gaurd
-
-# 2. Create virtual environment (recommended)
-python3 -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-
-# 3. Install base dependencies
-pip install -r requirements.txt
-
-# 4. (Optional) Install full AI stack
-pip install cmake dlib face-recognition deepface
 ```
 
-## Run
+- **Windows:** double-click `install.bat`, then `run.bat`
+- **macOS / Linux:** `./install.sh`, then `./run.sh`
+
+The installer creates a `.venv` folder and asks whether to install:
+
+- **Face recognition** (needed for attendance) — uses `dlib-bin`, a prebuilt dlib, so no
+  CMake or Visual Studio is needed.
+- **Emotion analysis** (DeepFace + TensorFlow, about 1 GB) — optional. Its model weights are
+  downloaded from GitHub the first time it runs, so that PC needs internet access once.
+
+Manual install:
 
 ```bash
+python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+pip install -r requirements-ai.txt                  # optional
+pip install --no-deps face_recognition              # optional, after the line above
 python main.py
-# or
-bash run.sh
 ```
+
+> OpenCV is pinned to 4.x (`opencv-python-headless<5`): OpenCV 5 removed the face and person
+> detectors this app uses, and the non-headless wheel conflicts with PyQt6's Qt plugins.
 
 ---
 
-## Camera Setup
+## Camera setup
 
-### RTSP URL Templates (auto-built from host/user/pass/channel)
+1. **Camera Management → + Add Camera** (or **ONVIF Discover → Add selected camera**).
+2. Choose the brand, enter IP, username, password and channel. Leave *Custom RTSP URL* blank
+   and the address is built for you (the hint under the field shows it).
+3. **Test Connection**, then **OK**. Turn on the AI features you want for this camera.
+4. **Live View → Start All** (or enable *Start all camera streams when the app opens* in
+   Settings). AI features only run on cameras whose stream is running.
 
-| Brand | Template |
+| Brand | Address built (main stream; sub-stream in brackets) |
 |---|---|
-| Hikvision | `rtsp://user:pass@host:554/Streaming/Channels/{channel}01` |
-| Dahua | `rtsp://user:pass@host:554/cam/realmonitor?channel={channel}&subtype=0` |
-| UNV | `rtsp://user:pass@host:554/media/video{channel}` |
-| CP Plus | `rtsp://user:pass@host:554/h264Preview_01_main` |
-| ONVIF | Auto-discovered via WS-Discovery |
-| Generic RTSP | Paste any custom URL |
+| Hikvision | `rtsp://user:pass@IP:554/Streaming/Channels/101` (`102`); channel 3 → `301` |
+| Dahua, CP Plus | `rtsp://user:pass@IP:554/cam/realmonitor?channel=1&subtype=0` (`subtype=1`) |
+| UNV | `rtsp://user:pass@IP:554/unicast/c1/s0/live` (`s1`) |
+| ONVIF / other | `rtsp://user:pass@IP:554/stream1` — or paste the camera's own URL |
 
-### Adding a Camera
+Passwords containing `@ : / # ?` are escaped automatically. Streams use RTSP over TCP, which
+is more reliable on Wi-Fi. Use the sub-stream for Wi-Fi cameras and grids larger than 2×2.
 
-1. Go to **Camera Management → + Add Camera**
-2. Fill in brand, host, credentials, channel
-3. Click **Test Connection** to verify RTSP
-4. Enable AI features (face detection, attendance, expression, safety) per camera
-5. Save — the camera appears immediately in Live View
-
-### ONVIF Auto-Discovery
-
-Click **ONVIF Discover** to scan the local network. Found devices appear in a list; copy the IP into the Add Camera form.
+> These paths are the brands' documented defaults but have **not yet been verified on real
+> hardware**. If a camera won't connect, paste its RTSP URL from the manual into
+> *Custom RTSP URL*.
 
 ---
 
-## AI Features
+## Data
 
-### Face Enrollment
+Everything is stored locally in `~/.classguard/` (Windows: `C:\Users\<you>\.classguard\`):
+`classguard.db` (SQLite), `settings.json`, `faces/`, `snapshots/` (attendance and alert
+photos) and `logs/classguard.log`. Databases from older versions are upgraded automatically.
 
-1. Go to **Face Enrollment → + Add Person** — fill name, employee ID, department
-2. Select the person row
-3. Click **Start Camera Capture** (uses webcam) or **Enroll from Image File**
-4. Click **Capture & Enroll** — the face embedding is stored in the database
-
-### Attendance
-
-- Any camera with **Attendance Tracking** enabled will automatically log check-in/check-out as enrolled persons appear
-- View records by date on the **Attendance** page
-- Export to CSV with one click
-
-### Expression Monitor
-
-- Select a camera and click **Start Monitoring**
-- Emotions are displayed in real time on the live feed with color-coded overlays
-- A running log shows time-stamped emotion events
-- Requires `deepface` package for full analysis; falls back to basic face detection otherwise
-
-### Safety Watch
-
-- Uses OpenCV HOG by default for person detection
-- Load a custom **YOLO weights + config + names** file for PPE violation detection (no-helmet, no-mask, no-vest)
-- Violations are logged in the table and saved to the database as `SafetyViolation` records
+Face data is biometric data: inform the people being recorded, obtain any consent your
+local law requires, and restrict access to this PC.
 
 ---
 
-## Project Structure
+## Development
 
-```
-class-gaurd/
-├── main.py                       # Entry point
-├── requirements.txt
-├── app/
-│   ├── config.py                   # All configuration constants
-│   ├── database.py                 # SQLAlchemy engine + session factory
-│   ├── models.py                   # Camera, NVR, Person, Attendance, Alert ...
-│   ├── core/
-│   │   ├── stream_manager.py       # RTSP QThread streaming
-│   │   ├── camera_manager.py       # Camera/NVR CRUD
-│   │   ├── face_engine.py          # Face detection & recognition
-│   │   ├── attendance_engine.py    # Attendance processing
-│   │   ├── expression_engine.py    # Emotion analysis
-│   │   ├── safety_engine.py        # PPE / zone detection
-│   │   └── recording.py            # Video recording
-│   ├── protocols/
-│   │   ├── onvif_handler.py        # ONVIF discovery & stream URI
-│   │   ├── hikvision.py            # Hikvision ISAPI + PTZ
-│   │   ├── dahua.py                # Dahua CGI API
-│   │   └── generic_rtsp.py         # RTSP probe / snapshot
-│   └── ui/
-│       ├── styles.py               # Dark theme QSS
-│       ├── main_window.py          # Main window + navigation
-│       ├── widgets/
-│       │   ├── sidebar.py
-│       │   ├── video_cell.py
-│       │   └── camera_grid.py
-│       └── pages/
-│           ├── dashboard.py
-│           ├── live_view.py
-│           ├── camera_management.py
-│           ├── nvr_management.py
-│           ├── face_enrollment.py
-│           ├── attendance.py
-│           ├── expression_monitor.py
-│           ├── safety_watch.py
-│           ├── alerts.py
-│           ├── recordings.py
-│           └── settings.py
+```bash
+pip install -r requirements-dev.txt -r requirements-ai.txt
+pip install --no-deps face_recognition scikit-image
+QT_QPA_PLATFORM=offscreen python -m pytest tests
 ```
 
----
+The suite (38 tests, about 20 s) covers URL building, settings, DB upgrades, attendance rules,
+alert cooldown, zones, ONNX parsing, face enrollment/recognition, the AI worker, the main
+screens, and an end-to-end run against a simulated RTSP camera, including unplugging and
+reconnecting it. The end-to-end test needs GStreamer's RTSP server
+(`apt install gstreamer1.0-rtsp gir1.2-gst-rtsp-server-1.0 python3-gi gstreamer1.0-plugins-ugly`)
+and is skipped otherwise.
 
-## Data Storage
-
-All data is stored in `~/.classguard/`:
-
-| Path | Contents |
-|---|---|
-| `classguard.db` | SQLite database |
-| `faces/` | Enrolled face photos |
-| `snapshots/` | Attendance & alert snapshots |
-| `recordings/` | Video recordings (MP4) |
-| `logs/` | Application logs |
-
----
-
-## Supported Brands
-
-- **Hikvision** — RTSP + ISAPI (HTTP) + PTZ control
-- **Dahua** — RTSP + CGI API + PTZ control
-- **UNV (Uniview)** — RTSP
-- **CP Plus** — RTSP
-- **ONVIF** — auto-discovery + stream URI fetch
-- **Generic RTSP** — any IP camera with RTSP stream
-
-Both **wired (Ethernet / PoE)** and **wireless (WiFi)** cameras are supported — connection type is a metadata field and does not affect the RTSP transport.
+```
+app/
+  config.py            settings, brand RTSP templates
+  database.py, models.py
+  core/
+    stream_manager.py  one thread per camera, timeouts, reconnect
+    ai_worker.py       single background thread for all AI
+    face_engine.py     enrollment + recognition (face_recognition / dlib)
+    attendance_engine.py, alerts.py, expression_engine.py, safety_engine.py
+  protocols/           ONVIF, Hikvision ISAPI, Dahua CGI, RTSP probe
+  ui/                  main window, pages, widgets
+tests/
+```

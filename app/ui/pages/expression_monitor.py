@@ -1,32 +1,40 @@
-import cv2
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSplitter, QScrollArea
-)
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QImage, QPixmap
-from app.core.expression_engine import ExpressionEngine, EMOTION_COLORS
-from app.core.stream_manager import StreamManager
-from typing import List, Dict
+import importlib.util
 from collections import Counter
 from datetime import datetime
+from typing import Dict, List, Optional
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QImage
+from PyQt6.QtWidgets import (
+    QComboBox, QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton,
+    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+)
+
+from app.core.expression_engine import EMOTION_COLORS
+from app.ui.widgets.zone_canvas import VideoCanvas
+from app.ui.styles import style_table
+
+EMOTIONS = ["happy", "neutral", "sad", "angry", "fear", "surprise", "disgust"]
+
+
+def _hex(bgr) -> str:
+    b, g, r = bgr
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 class ExpressionMonitor(QWidget):
-    def __init__(self, db, stream_manager: StreamManager, parent=None):
+    """Displays emotion results produced by the background AI worker."""
+
+    monitor_changed = pyqtSignal(str, object)  # "expression", camera_id or None
+
+    def __init__(self, db, parent=None):
         super().__init__(parent)
         self.db = db
-        self.sm = stream_manager
-        self.ee = ExpressionEngine()
         self._cameras: List[Dict] = []
-        self._active_cam_id: int = None
-        self._current_frame = None
-        self._emotion_counter: Counter = Counter()
-        self._log: List[Dict] = []
+        self._active: Optional[int] = None
+        self._counter: Counter = Counter()
+        self._model_ok = importlib.util.find_spec("deepface") is not None
         self._build_ui()
-        self._analysis_timer = QTimer()
-        self._analysis_timer.timeout.connect(self._analyze)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -36,131 +44,121 @@ class ExpressionMonitor(QWidget):
         hdr = QHBoxLayout()
         title = QLabel("Expression Monitor")
         title.setObjectName("page_title")
-        hdr.addWidget(title); hdr.addStretch()
+        hdr.addWidget(title)
+        hdr.addStretch()
         hdr.addWidget(QLabel("Camera:"))
         self._cam_cb = QComboBox()
-        self._cam_cb.currentIndexChanged.connect(self._switch_camera)
+        self._cam_cb.setMinimumWidth(180)
         hdr.addWidget(self._cam_cb)
-        self._btn_toggle = QPushButton("Start Monitoring")
-        self._btn_toggle.setObjectName("primary_btn")
-        self._btn_toggle.clicked.connect(self._toggle)
-        hdr.addWidget(self._btn_toggle)
+        self._btn = QPushButton("Start Monitoring")
+        self._btn.setObjectName("primary_btn")
+        self._btn.clicked.connect(self._toggle)
+        hdr.addWidget(self._btn)
         root.addLayout(hdr)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        if not self._model_ok:
+            note = QLabel("The emotion model (DeepFace) is not installed, so faces are "
+                          "outlined but emotions are not read. Install it with: "
+                          "pip install -r requirements-ai.txt")
+            note.setWordWrap(True)
+            note.setStyleSheet("background:#3a2a10; color:#f3c068; padding:8px; border-radius:4px;")
+            root.addWidget(note)
 
-        # Left: live feed
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
         ll = QVBoxLayout(left)
-        self._video_lbl = QLabel("No stream")
-        self._video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._video_lbl.setStyleSheet("background:#09090f; border:1px solid #252550;")
-        self._video_lbl.setMinimumHeight(360)
-        ll.addWidget(self._video_lbl)
-
-        # Emotion bars
-        self._bars: Dict[str, QLabel] = {}
-        for emo in ["happy", "neutral", "sad", "angry", "fear", "surprise", "disgust"]:
+        ll.setContentsMargins(0, 0, 0, 0)
+        self._video = VideoCanvas("Select a camera and click Start Monitoring")
+        ll.addWidget(self._video, 1)
+        self._bars: Dict[str, QProgressBar] = {}
+        for emo in EMOTIONS:
             row = QHBoxLayout()
             name = QLabel(emo.capitalize())
             name.setFixedWidth(70)
-            name.setStyleSheet("font-size:11px;")
-            bar = QLabel()
-            bar.setFixedHeight(12)
-            bar.setStyleSheet("background:#252550; border-radius:6px;")
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setFixedHeight(14)
+            bar.setFormat("%p%")
+            bar.setStyleSheet(f"QProgressBar::chunk{{background:{_hex(EMOTION_COLORS[emo])};}}")
             self._bars[emo] = bar
-            row.addWidget(name); row.addWidget(bar)
+            row.addWidget(name)
+            row.addWidget(bar)
             ll.addLayout(row)
         splitter.addWidget(left)
 
-        # Right: log table
         right = QWidget()
         rl = QVBoxLayout(right)
-        rl.addWidget(QLabel("Expression Log"))
-        self._log_table = QTableWidget(0, 4)
-        self._log_table.setHorizontalHeaderLabels(["Time", "Camera", "Emotion", "Confidence"])
-        self._log_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
-        self._log_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._log_table.setAlternatingRowColors(True)
-        rl.addWidget(self._log_table)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.addWidget(QLabel("Expression log"))
+        self._log = QTableWidget(0, 3)
+        style_table(self._log)
+        self._log.setHorizontalHeaderLabels(["Time", "Emotion", "Confidence"])
+        self._log.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._log.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._log.setAlternatingRowColors(True)
+        rl.addWidget(self._log)
         splitter.addWidget(right)
-        splitter.setSizes([580, 340])
-        root.addWidget(splitter)
+        splitter.setSizes([620, 320])
+        root.addWidget(splitter, 1)
 
+    # --------------------------------------------------------------- inputs
     def set_cameras(self, cameras: List[Dict]):
+        current = self._cam_cb.currentData()
         self._cameras = cameras
+        self._cam_cb.blockSignals(True)
         self._cam_cb.clear()
         for c in cameras:
             self._cam_cb.addItem(c["name"], c["id"])
-
-    def _switch_camera(self, idx: int):
-        if idx < 0 or idx >= len(self._cameras):
-            return
-        self._active_cam_id = self._cameras[idx]["id"]
+        idx = self._cam_cb.findData(current)
+        self._cam_cb.setCurrentIndex(max(idx, 0))
+        self._cam_cb.blockSignals(False)
+        if self._active is not None and self._active not in {c["id"] for c in cameras}:
+            self._stop()
 
     def _toggle(self):
-        if self._analysis_timer.isActive():
-            self._analysis_timer.stop()
-            self._btn_toggle.setText("Start Monitoring")
-            self._btn_toggle.setObjectName("primary_btn")
+        if self._active is None:
+            cid = self._cam_cb.currentData()
+            if cid is None:
+                self._video.clear_image("Add a camera first (Camera Management).")
+                return
+            self._active = cid
+            self._counter.clear()
+            self._cam_cb.setEnabled(False)
+            self._btn.setText("Stop Monitoring")
+            self._video.clear_image("Connecting to the camera…")
+            self.monitor_changed.emit("expression", cid)
         else:
-            if self._active_cam_id is None and self._cameras:
-                self._active_cam_id = self._cameras[0]["id"]
-            self._analysis_timer.start(500)  # analyze every 0.5s
-            self._btn_toggle.setText("Stop Monitoring")
-            self._btn_toggle.setObjectName("danger_btn")
+            self._stop()
 
-    def receive_frame(self, camera_id: int, frame):
-        if camera_id == self._active_cam_id:
-            self._current_frame = frame.copy()
+    def _stop(self):
+        self._active = None
+        self._cam_cb.setEnabled(True)
+        self._btn.setText("Start Monitoring")
+        self._video.clear_image("Monitoring stopped")
+        self.monitor_changed.emit("expression", None)
 
-    def _analyze(self):
-        if self._current_frame is None:
+    def on_frame(self, kind: str, camera_id: int, img: QImage):
+        if kind == "expression" and camera_id == self._active:
+            self._video.set_image(img)
+
+    def on_results(self, camera_id: int, results: list):
+        if camera_id != self._active or not self._model_ok:
             return
-        frame = self._current_frame.copy()
-        results = self.ee.analyze(frame)
-        annotated = self.ee.draw(frame, results)
-
-        rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        img = QImage(rgb.data.tobytes(), w, h, ch*w, QImage.Format.Format_RGB888)
-        pix = QPixmap.fromImage(img).scaled(
-            self._video_lbl.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self._video_lbl.setPixmap(pix)
-
         for r in results:
-            emo = r["dominant_emotion"]
-            conf = r["confidence"]
-            self._emotion_counter[emo] += 1
-            self._add_log(emo, conf)
-
-        # update bars
-        total = max(sum(self._emotion_counter.values()), 1)
+            emo = r.get("dominant_emotion")
+            if emo in self._bars:
+                self._counter[emo] += 1
+                self._add_log(emo, r.get("confidence", 0.0))
+        total = sum(self._counter.values()) or 1
         for emo, bar in self._bars.items():
-            pct = self._emotion_counter.get(emo, 0) / total
-            color = "#{:02x}{:02x}{:02x}".format(*EMOTION_COLORS.get(emo, (100,100,100))[::-1])
-            bar.setStyleSheet(
-                f"background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-                f"stop:0 {color}, stop:{pct:.2f} {color}, "
-                f"stop:{min(pct+0.001,1.0):.3f} #252550, stop:1 #252550);"
-                f"border-radius:6px;"
-            )
+            bar.setValue(int(100 * self._counter.get(emo, 0) / total))
 
     def _add_log(self, emotion: str, confidence: float):
-        cam_name = next((c["name"] for c in self._cameras
-                         if c["id"] == self._active_cam_id), "Unknown")
-        r = self._log_table.rowCount()
-        if r > 200: 
-            self._log_table.removeRow(0)
-            r = self._log_table.rowCount()
-        self._log_table.insertRow(r)
-        self._log_table.setItem(r, 0, QTableWidgetItem(datetime.now().strftime("%H:%M:%S")))
-        self._log_table.setItem(r, 1, QTableWidgetItem(cam_name))
-        self._log_table.setItem(r, 2, QTableWidgetItem(emotion.capitalize()))
-        self._log_table.setItem(r, 3, QTableWidgetItem(f"{confidence:.1f}%"))
-        self._log_table.scrollToBottom()
+        if self._log.rowCount() >= 300:
+            self._log.removeRow(0)
+        r = self._log.rowCount()
+        self._log.insertRow(r)
+        for c, v in enumerate([datetime.now().strftime("%H:%M:%S"),
+                               emotion.capitalize(), f"{confidence:.0f}%"]):
+            self._log.setItem(r, c, QTableWidgetItem(v))
+        self._log.scrollToBottom()

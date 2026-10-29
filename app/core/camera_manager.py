@@ -14,14 +14,9 @@ class CameraManager:
     def add_camera(self, data: Dict) -> Camera:
         session = self.db.get_session()
         try:
+            data = dict(data)
             if not data.get("rtsp_url"):
-                data["rtsp_url"] = Config.build_rtsp_url(
-                    data.get("brand", "Generic RTSP"),
-                    data["host"], data.get("port", 554),
-                    data.get("username", "admin"),
-                    data.get("password", ""),
-                    data.get("channel", 1),
-                )
+                data["rtsp_url"] = self.auto_url(data)
             cam = Camera(**data)
             session.add(cam)
             session.commit()
@@ -38,17 +33,16 @@ class CameraManager:
     def update_camera(self, camera_id: int, data: Dict) -> Optional[Camera]:
         session = self.db.get_session()
         try:
-            cam = session.query(Camera).get(camera_id)
+            cam = session.get(Camera, camera_id)
             if not cam:
                 return None
             for k, v in data.items():
                 if hasattr(cam, k):
                     setattr(cam, k, v)
+            # rtsp_url=None means "build it from the connection details", so
+            # changing the IP / password / channel always takes effect.
             if not cam.rtsp_url:
-                cam.rtsp_url = Config.build_rtsp_url(
-                    cam.brand, cam.host, cam.port,
-                    cam.username, cam.password, cam.channel
-                )
+                cam.rtsp_url = self.auto_url(self._cam_dict(cam))
             session.commit()
             return cam
         except Exception as e:
@@ -61,9 +55,11 @@ class CameraManager:
     def delete_camera(self, camera_id: int) -> bool:
         session = self.db.get_session()
         try:
-            cam = session.query(Camera).get(camera_id)
+            cam = session.get(Camera, camera_id)
             if not cam:
                 return False
+            from app.models import Zone
+            session.query(Zone).filter_by(camera_id=camera_id).delete()
             session.delete(cam)
             session.commit()
             return True
@@ -88,10 +84,17 @@ class CameraManager:
     def get_camera(self, camera_id: int) -> Optional[Dict]:
         session = self.db.get_session()
         try:
-            cam = session.query(Camera).get(camera_id)
+            cam = session.get(Camera, camera_id)
             return self._cam_dict(cam) if cam else None
         finally:
             session.close()
+
+    @staticmethod
+    def auto_url(d: Dict) -> str:
+        return Config.build_rtsp_url(
+            d.get("brand", "Generic RTSP"), d["host"], d.get("port", 554),
+            d.get("username", "admin"), d.get("password", ""),
+            d.get("channel", 1), bool(d.get("use_substream")))
 
     @staticmethod
     def _cam_dict(cam: Camera) -> Dict:
@@ -101,6 +104,7 @@ class CameraManager:
             "host": cam.host, "port": cam.port, "http_port": cam.http_port,
             "username": cam.username, "password": cam.password,
             "channel": cam.channel, "rtsp_url": cam.rtsp_url,
+            "use_substream": bool(cam.use_substream),
             "onvif_enabled": cam.onvif_enabled, "is_active": cam.is_active,
             "location": cam.location or "", "group_name": cam.group_name or "Default",
             "nvr_id": cam.nvr_id,
@@ -121,7 +125,7 @@ class CameraManager:
             session.refresh(nvr)
             logger.info("NVR added: %s (id=%d)", nvr.name, nvr.id)
             return nvr
-        except Exception as e:
+        except Exception:
             session.rollback()
             raise
         finally:
@@ -144,14 +148,15 @@ class CameraManager:
     def delete_nvr(self, nvr_id: int) -> bool:
         session = self.db.get_session()
         try:
-            nvr = session.query(NVR).get(nvr_id)
+            nvr = session.get(NVR, nvr_id)
             if not nvr:
                 return False
             session.delete(nvr)
             session.commit()
             return True
-        except Exception as e:
+        except Exception:
             session.rollback()
+            logger.exception("delete_nvr failed")
             return False
         finally:
             session.close()

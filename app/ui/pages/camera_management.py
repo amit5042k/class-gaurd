@@ -1,15 +1,19 @@
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QTableWidget, QTableWidgetItem, QHeaderView, QDialog,
-    QFormLayout, QLineEdit, QComboBox, QSpinBox, QCheckBox,
-    QGroupBox, QGridLayout, QMessageBox, QDialogButtonBox,
-    QListWidget, QListWidgetItem
-)
-from PyQt6.QtCore import Qt, pyqtSignal
-from app.core.camera_manager import CameraManager
-from app.config import Config
-from app.protocols.onvif_handler import ONVIFHandler
+from urllib.parse import urlparse
 
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget
+)
+
+from app.config import Config
+from app.core.camera_manager import CameraManager
+from app.protocols.generic_rtsp import RTSPProbe
+from app.protocols.onvif_handler import ONVIFHandler
+from app.ui.async_task import run_async
+from app.ui.styles import style_table
 
 COLS = ["ID", "Name", "Brand", "Type", "Host", "Port",
         "Channel", "Group", "Connection", "Status", "Actions"]
@@ -18,12 +22,12 @@ COLS = ["ID", "Name", "Brand", "Type", "Host", "Port",
 class CameraDialog(QDialog):
     def __init__(self, data: dict = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Add Camera" if not data else "Edit Camera")
-        self.setMinimumWidth(540)
-        self._data = data or {}
+        self.setWindowTitle("Edit Camera" if data and data.get("id") else "Add Camera")
+        self.setMinimumWidth(560)
         self._build_ui()
         if data:
             self._populate(data)
+        self._update_url_hint()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -31,153 +35,258 @@ class CameraDialog(QDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         def lbl(t):
-            l = QLabel(t)
-            l.setObjectName("form_label")
-            return l
+            label = QLabel(t)
+            label.setObjectName("form_label")
+            return label
 
-        self._name     = QLineEdit()
+        self._name = QLineEdit()
         self._name.setPlaceholderText("Camera name")
-        self._brand    = QComboBox()
+        self._brand = QComboBox()
         self._brand.addItems(Config.CAMERA_BRANDS)
         self._cam_type = QComboBox()
         self._cam_type.addItems(Config.CAMERA_TYPES)
-        self._conn     = QComboBox()
+        self._conn = QComboBox()
         self._conn.addItems(Config.CONN_TYPES)
-        self._host     = QLineEdit()
+        self._host = QLineEdit()
         self._host.setPlaceholderText("192.168.1.100")
-        self._port     = QSpinBox()
+        self._port = QSpinBox()
         self._port.setRange(1, 65535)
         self._port.setValue(554)
-        self._http     = QSpinBox()
+        self._http = QSpinBox()
         self._http.setRange(1, 65535)
         self._http.setValue(80)
-        self._user     = QLineEdit()
-        self._user.setText("admin")
-        self._pwd      = QLineEdit()
+        self._user = QLineEdit("admin")
+        self._pwd = QLineEdit()
         self._pwd.setEchoMode(QLineEdit.EchoMode.Password)
-        self._ch       = QSpinBox()
-        self._ch.setRange(1, 32)
+        self._ch = QSpinBox()
+        self._ch.setRange(1, 128)
         self._ch.setValue(1)
-        self._loc      = QLineEdit()
+        self._sub = QCheckBox("Use sub-stream (lower quality, less bandwidth; good for Wi-Fi and big grids)")
+        self._active = QCheckBox("Camera enabled")
+        self._active.setChecked(True)
+        self._loc = QLineEdit()
         self._loc.setPlaceholderText("e.g. Main Gate")
-        self._group    = QLineEdit()
-        self._group.setText("Default")
-        self._rtsp     = QLineEdit()
-        self._rtsp.setPlaceholderText("Leave blank to auto-build")
+        self._group = QLineEdit("Default")
+        self._rtsp = QLineEdit()
+        self._url_hint = QLabel()
+        self._url_hint.setWordWrap(True)
+        self._url_hint.setStyleSheet("color:#777; font-size:11px;")
 
-        form.addRow(lbl("Name:"),           self._name)
-        form.addRow(lbl("Brand:"),          self._brand)
-        form.addRow(lbl("Type:"),           self._cam_type)
-        form.addRow(lbl("Connection:"),     self._conn)
-        form.addRow(lbl("Host / IP:"),      self._host)
-        form.addRow(lbl("RTSP Port:"),      self._port)
-        form.addRow(lbl("HTTP Port:"),      self._http)
-        form.addRow(lbl("Username:"),       self._user)
-        form.addRow(lbl("Password:"),       self._pwd)
-        form.addRow(lbl("Channel:"),        self._ch)
-        form.addRow(lbl("Location:"),       self._loc)
-        form.addRow(lbl("Group:"),          self._group)
-        form.addRow(lbl("Custom RTSP URL:"),self._rtsp)
+        form.addRow(lbl("Name:"), self._name)
+        form.addRow(lbl("Brand:"), self._brand)
+        form.addRow(lbl("Type:"), self._cam_type)
+        form.addRow(lbl("Connection:"), self._conn)
+        form.addRow(lbl("Host / IP:"), self._host)
+        form.addRow(lbl("RTSP Port:"), self._port)
+        form.addRow(lbl("HTTP Port:"), self._http)
+        form.addRow(lbl("Username:"), self._user)
+        form.addRow(lbl("Password:"), self._pwd)
+        form.addRow(lbl("Channel:"), self._ch)
+        form.addRow(lbl(""), self._sub)
+        form.addRow(lbl("Location:"), self._loc)
+        form.addRow(lbl("Group:"), self._group)
+        form.addRow(lbl("Custom RTSP URL:"), self._rtsp)
+        form.addRow(lbl(""), self._url_hint)
+        form.addRow(lbl(""), self._active)
         layout.addLayout(form)
+
+        for w in (self._brand,):
+            w.currentIndexChanged.connect(self._update_url_hint)
+        for w in (self._host, self._user, self._pwd, self._rtsp):
+            w.textChanged.connect(self._update_url_hint)
+        for w in (self._port, self._ch):
+            w.valueChanged.connect(self._update_url_hint)
+        self._sub.toggled.connect(self._update_url_hint)
 
         gb = QGroupBox("AI Features")
         gl = QGridLayout(gb)
-        self._face_det = QCheckBox("Face Detection")
-        self._attend   = QCheckBox("Attendance Tracking")
-        self._expr     = QCheckBox("Expression Monitor")
-        self._safety   = QCheckBox("Safety Watch")
-        self._rec      = QCheckBox("Auto Recording")
-        for i, cb in enumerate([self._face_det, self._attend,
-                                 self._expr, self._safety, self._rec]):
+        self._face_det = QCheckBox("Face Recognition")
+        self._attend = QCheckBox("Attendance Tracking")
+        self._expr = QCheckBox("Expression Monitor")
+        self._safety = QCheckBox("Safety Watch")
+        self._rec = QCheckBox("Auto Recording (coming soon)")
+        self._rec.setEnabled(False)
+        for i, cb in enumerate([self._face_det, self._attend, self._expr,
+                                self._safety, self._rec]):
             gl.addWidget(cb, i // 2, i % 2)
         layout.addWidget(gb)
 
         btn_row = QHBoxLayout()
-        test_btn = QPushButton("Test Connection")
-        test_btn.setObjectName("secondary_btn")
-        test_btn.clicked.connect(self._test_conn)
-        btn_row.addWidget(test_btn)
-        btn_row.addStretch()
+        self._test_btn = QPushButton("Test Connection")
+        self._test_btn.setObjectName("secondary_btn")
+        self._test_btn.clicked.connect(self._test_conn)
+        self._test_result = QLabel()
+        self._test_result.setWordWrap(True)
+        btn_row.addWidget(self._test_btn)
+        btn_row.addWidget(self._test_result, 1)
         layout.addLayout(btn_row)
 
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _set_combo(self, combo: QComboBox, text: str):
+        idx = combo.findText(text or "")
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
     def _populate(self, d: dict):
         self._name.setText(d.get("name", ""))
-        idx = self._brand.findText(d.get("brand", ""))
-        if idx >= 0:
-            self._brand.setCurrentIndex(idx)
-        idx = self._cam_type.findText(d.get("camera_type", ""))
-        if idx >= 0:
-            self._cam_type.setCurrentIndex(idx)
-        idx = self._conn.findText(d.get("connection_type", ""))
-        if idx >= 0:
-            self._conn.setCurrentIndex(idx)
+        self._set_combo(self._brand, d.get("brand"))
+        self._set_combo(self._cam_type, d.get("camera_type"))
+        self._set_combo(self._conn, d.get("connection_type"))
         self._host.setText(d.get("host", ""))
-        self._port.setValue(d.get("port", 554))
-        self._http.setValue(d.get("http_port", 80))
+        self._port.setValue(d.get("port") or 554)
+        self._http.setValue(d.get("http_port") or 80)
         self._user.setText(d.get("username", "admin"))
         self._pwd.setText(d.get("password", ""))
-        self._ch.setValue(d.get("channel", 1))
+        self._ch.setValue(d.get("channel") or 1)
+        self._sub.setChecked(bool(d.get("use_substream")))
+        self._active.setChecked(d.get("is_active", True) is not False)
         self._loc.setText(d.get("location", ""))
         self._group.setText(d.get("group_name", "Default"))
-        self._rtsp.setText(d.get("rtsp_url", ""))
+        stored = d.get("rtsp_url") or ""
+        # Only show a URL here if it was custom; auto-built ones are regenerated.
+        if stored and d.get("host") and stored != CameraManager.auto_url(d):
+            self._rtsp.setText(stored)
         self._face_det.setChecked(bool(d.get("face_detection")))
         self._attend.setChecked(bool(d.get("attendance_tracking")))
         self._expr.setChecked(bool(d.get("expression_monitor")))
         self._safety.setChecked(bool(d.get("safety_watch")))
-        self._rec.setChecked(bool(d.get("recording_enabled")))
+
+    def _auto_url(self) -> str:
+        return Config.build_rtsp_url(
+            self._brand.currentText(), self._host.text().strip() or "<ip>",
+            self._port.value(), self._user.text(), self._pwd.text(),
+            self._ch.value(), self._sub.isChecked())
+
+    def _effective_url(self) -> str:
+        return self._rtsp.text().strip() or self._auto_url()
+
+    def _update_url_hint(self):
+        if self._rtsp.text().strip():
+            self._url_hint.setText("Using your custom URL.")
+        else:
+            shown = Config.build_rtsp_url(
+                self._brand.currentText(), self._host.text().strip() or "<ip>",
+                self._port.value(), self._user.text(), "****" if self._pwd.text() else "",
+                self._ch.value(), self._sub.isChecked())
+            self._url_hint.setText(f"Leave blank to use: {shown}")
 
     def _test_conn(self):
-        import threading
-        from app.protocols.generic_rtsp import RTSPProbe
-        rtsp = self._rtsp.text().strip() or Config.build_rtsp_url(
-            self._brand.currentText(), self._host.text(),
-            self._port.value(), self._user.text(), self._pwd.text(),
-            self._ch.value()
-        )
+        if not self._host.text().strip() and not self._rtsp.text().strip():
+            self._test_result.setText("Enter the camera's IP address first.")
+            return
+        self._test_btn.setEnabled(False)
+        self._test_result.setStyleSheet("color:#9098b1;")
+        self._test_result.setText("Testing… (up to 10 seconds)")
+        run_async(lambda url: RTSPProbe(url).test_connection(),
+                  self._on_test_done, self._effective_url(), receiver=self)
 
-        def run():
-            ok = RTSPProbe(rtsp).test_connection()
-            QMessageBox.information(
-                self, "Test",
-                f"{'Connected' if ok else 'Failed'}\n{rtsp}"
-            )
+    def _on_test_done(self, result, error):
+        self._test_btn.setEnabled(True)
+        ok, msg = result if result else (False, str(error))
+        self._test_result.setStyleSheet("color:#27ae60;" if ok else "color:#ef4565;")
+        self._test_result.setText(("Connected. " if ok else "Failed. ") + msg)
 
-        threading.Thread(target=run, daemon=True).start()
+    def _accept(self):
+        if not self._name.text().strip() or not (self._host.text().strip() or
+                                                 self._rtsp.text().strip()):
+            QMessageBox.warning(self, "Missing details", "Name and host / IP are required.")
+            return
+        self.accept()
 
     def get_data(self) -> dict:
+        host = self._host.text().strip()
+        custom = self._rtsp.text().strip()
+        if not host and custom:
+            host = urlparse(custom).hostname or custom
         return {
-            "name":               self._name.text().strip(),
-            "brand":              self._brand.currentText(),
-            "camera_type":        self._cam_type.currentText(),
-            "connection_type":    self._conn.currentText(),
-            "host":               self._host.text().strip(),
-            "port":               self._port.value(),
-            "http_port":          self._http.value(),
-            "username":           self._user.text(),
-            "password":           self._pwd.text(),
-            "channel":            self._ch.value(),
-            "location":           self._loc.text(),
-            "group_name":         self._group.text() or "Default",
-            "rtsp_url":           self._rtsp.text().strip() or None,
-            "face_detection":     self._face_det.isChecked(),
-            "attendance_tracking":self._attend.isChecked(),
+            "name": self._name.text().strip(),
+            "brand": self._brand.currentText(),
+            "camera_type": self._cam_type.currentText(),
+            "connection_type": self._conn.currentText(),
+            "host": host,
+            "port": self._port.value(),
+            "http_port": self._http.value(),
+            "username": self._user.text(),
+            "password": self._pwd.text(),
+            "channel": self._ch.value(),
+            "use_substream": self._sub.isChecked(),
+            "is_active": self._active.isChecked(),
+            "location": self._loc.text(),
+            "group_name": self._group.text() or "Default",
+            "rtsp_url": custom or None,
+            "face_detection": self._face_det.isChecked(),
+            "attendance_tracking": self._attend.isChecked(),
             "expression_monitor": self._expr.isChecked(),
-            "safety_watch":       self._safety.isChecked(),
-            "recording_enabled":  self._rec.isChecked(),
+            "safety_watch": self._safety.isChecked(),
         }
+
+
+class DiscoveryDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ONVIF Discovery")
+        self.setMinimumSize(520, 360)
+        self.selected_host = None
+        vl = QVBoxLayout(self)
+        self._status = QLabel("Scanning the local network for ONVIF cameras…")
+        vl.addWidget(self._status)
+        self._list = QListWidget()
+        self._list.itemDoubleClicked.connect(lambda _: self._use())
+        vl.addWidget(self._list)
+        row = QHBoxLayout()
+        self._rescan = QPushButton("Scan again")
+        self._rescan.setObjectName("secondary_btn")
+        self._rescan.clicked.connect(self._scan)
+        self._use_btn = QPushButton("Add selected camera")
+        self._use_btn.setObjectName("primary_btn")
+        self._use_btn.setEnabled(False)
+        self._use_btn.clicked.connect(self._use)
+        close = QPushButton("Close")
+        close.clicked.connect(self.reject)
+        row.addWidget(self._rescan)
+        row.addStretch()
+        row.addWidget(self._use_btn)
+        row.addWidget(close)
+        vl.addLayout(row)
+        self._list.currentItemChanged.connect(
+            lambda cur, _: self._use_btn.setEnabled(cur is not None and
+                                                    cur.data(Qt.ItemDataRole.UserRole) is not None))
+        self._scan()
+
+    def _scan(self):
+        self._list.clear()
+        self._rescan.setEnabled(False)
+        self._status.setText("Scanning the local network for ONVIF cameras…")
+        run_async(ONVIFHandler.discover, self._on_found, 6, receiver=self)
+
+    def _on_found(self, found, error):
+        self._rescan.setEnabled(True)
+        if error or not found:
+            self._status.setText("No cameras found." + (f" ({error})" if error else
+                                 " Check the camera is on the same network and ONVIF is enabled."))
+            return
+        self._status.setText(f"Found {len(found)} device(s). Select one to add it.")
+        for f in found:
+            host = urlparse(f["url"]).hostname
+            item = QListWidgetItem(f"{host}    ({f['url']})")
+            item.setData(Qt.ItemDataRole.UserRole, host)
+            self._list.addItem(item)
+
+    def _use(self):
+        item = self._list.currentItem()
+        if item and item.data(Qt.ItemDataRole.UserRole):
+            self.selected_host = item.data(Qt.ItemDataRole.UserRole)
+            self.accept()
 
 
 class CameraManagement(QWidget):
     # Emitted after any add / edit / delete so MainWindow can reload
-    # live-view camera list and AI page camera selectors.
+    # the live view, AI worker and page camera lists.
     cameras_changed = pyqtSignal()
 
     def __init__(self, db, parent=None):
@@ -197,26 +306,24 @@ class CameraManagement(QWidget):
         title.setObjectName("page_title")
         hdr.addWidget(title)
         hdr.addStretch()
-
         btn_discover = QPushButton("ONVIF Discover")
         btn_discover.setObjectName("secondary_btn")
         btn_discover.clicked.connect(self._discover)
         btn_add = QPushButton("+ Add Camera")
         btn_add.setObjectName("primary_btn")
-        btn_add.clicked.connect(self._add)
+        btn_add.clicked.connect(lambda: self._add())
         hdr.addWidget(btn_discover)
         hdr.addWidget(btn_add)
         root.addLayout(hdr)
 
         self._table = QTableWidget(0, len(COLS))
+
+        style_table(self._table)
         self._table.setHorizontalHeaderLabels(COLS)
         self._table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
-        )
+            QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
-        )
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
         root.addWidget(self._table)
@@ -228,11 +335,10 @@ class CameraManagement(QWidget):
             r = self._table.rowCount()
             self._table.insertRow(r)
             for c, val in enumerate([
-                str(cam["id"]), cam["name"], cam["brand"],
-                cam["camera_type"], cam["host"],
-                str(cam["port"]), str(cam["channel"]),
+                str(cam["id"]), cam["name"], cam["brand"], cam["camera_type"],
+                cam["host"], str(cam["port"]), str(cam["channel"]),
                 cam["group_name"], cam["connection_type"],
-                "Active" if cam["is_active"] else "Inactive"
+                "Enabled" if cam["is_active"] else "Disabled",
             ]):
                 item = QTableWidgetItem(val)
                 item.setData(Qt.ItemDataRole.UserRole, cam["id"])
@@ -244,10 +350,8 @@ class CameraManagement(QWidget):
             al.setSpacing(4)
             edit_btn = QPushButton("Edit")
             edit_btn.setObjectName("secondary_btn")
-            edit_btn.setFixedWidth(50)
-            del_btn = QPushButton("Del")
+            del_btn = QPushButton("Delete")
             del_btn.setObjectName("danger_btn")
-            del_btn.setFixedWidth(40)
             cid = cam["id"]
             edit_btn.clicked.connect(lambda _, i=cid: self._edit(i))
             del_btn.clicked.connect(lambda _, i=cid: self._delete(i))
@@ -255,19 +359,16 @@ class CameraManagement(QWidget):
             al.addWidget(del_btn)
             self._table.setCellWidget(r, len(COLS) - 1, actions)
 
-    def _add(self):
-        dlg = CameraDialog(parent=self)
+    def _add(self, prefill: dict = None):
+        dlg = CameraDialog(data=prefill, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            data = dlg.get_data()
-            if not data["name"] or not data["host"]:
-                QMessageBox.warning(self, "Error", "Name and host are required.")
-                return
             try:
-                self.mgr.add_camera(data)
-                self.refresh()
-                self.cameras_changed.emit()   # notify MainWindow
+                self.mgr.add_camera(dlg.get_data())
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+                return
+            self.refresh()
+            self.cameras_changed.emit()
 
     def _edit(self, camera_id: int):
         cam = self.mgr.get_camera(camera_id)
@@ -277,40 +378,23 @@ class CameraManagement(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             try:
                 self.mgr.update_camera(camera_id, dlg.get_data())
-                self.refresh()
-                self.cameras_changed.emit()   # notify MainWindow
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+                return
+            self.refresh()
+            self.cameras_changed.emit()
 
     def _delete(self, camera_id: int):
         if QMessageBox.question(
-            self, "Confirm", "Delete this camera?",
+            self, "Confirm", "Delete this camera? Its safety zones are deleted too.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             self.mgr.delete_camera(camera_id)
             self.refresh()
-            self.cameras_changed.emit()       # notify MainWindow
+            self.cameras_changed.emit()
 
     def _discover(self):
-        import threading
-        dlg = QDialog(self)
-        dlg.setWindowTitle("ONVIF Discovery")
-        dlg.setMinimumSize(500, 350)
-        vl = QVBoxLayout(dlg)
-        vl.addWidget(QLabel("Scanning network for ONVIF cameras..."))
-        lst = QListWidget()
-        lst.setStyleSheet("background:#1b1b30; color:#dde1ec;")
-        vl.addWidget(lst)
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        bb.rejected.connect(dlg.reject)
-        vl.addWidget(bb)
-
-        def run():
-            found = ONVIFHandler.discover(timeout=6)
-            for f in found:
-                lst.addItem(f["url"])
-            if not found:
-                lst.addItem("No cameras found.")
-
-        threading.Thread(target=run, daemon=True).start()
-        dlg.exec()
+        dlg = DiscoveryDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_host:
+            self._add({"name": f"ONVIF {dlg.selected_host}", "brand": "ONVIF",
+                       "host": dlg.selected_host, "port": 554})

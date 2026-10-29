@@ -63,6 +63,11 @@ QPushButton#secondary_btn {
 QPushButton#secondary_btn:hover { background: #303065; }
 QPushButton#danger_btn  { background: #c0392b; color: white; border: none; }
 QPushButton#success_btn { background: #27ae60; color: white; border: none; }
+QPushButton:disabled, QPushButton#secondary_btn:disabled,
+QPushButton#danger_btn:disabled, QPushButton#success_btn:disabled {
+    background: #22223a; color: #5a5e78; border: 1px solid #2a2a48;
+}
+QTableWidget QPushButton { padding: 2px 10px; min-height: 0; font-size: 12px; }
 QPushButton#icon_btn {
     background: transparent; border: none;
     color: #9098b1; padding: 4px 8px;
@@ -181,3 +186,9 @@ QDialog { background: #1b1b30; }
 QLabel  { color: #dde1ec; }
 QLabel#form_label { color: #9098b1; font-size: 12px; }
 """
+
+
+def style_table(table, row_height: int = 34):
+    """Taller rows (room for action buttons) and no duplicate row-number column."""
+    table.verticalHeader().setVisible(False)
+    table.verticalHeader().setDefaultSectionSize(row_height)

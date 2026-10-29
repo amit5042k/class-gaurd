@@ -19,6 +19,7 @@ EMOTION_COLORS = {
 class ExpressionEngine:
     def __init__(self):
         self._deepface_ok = self._probe_deepface()
+        self.available = self._deepface_ok
         self._cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
@@ -66,8 +67,8 @@ class ExpressionEngine:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = self._cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
         return [
-            {"bbox": (x, y, x+w, y+h), "dominant_emotion": "neutral",
-             "emotions": {}, "confidence": 0.0}
+            {"bbox": (int(x), int(y), int(x + w), int(y + h)),
+             "dominant_emotion": "unknown", "emotions": {}, "confidence": 0.0}
             for (x, y, w, h) in faces
         ]
 
@@ -77,7 +78,8 @@ class ExpressionEngine:
             emotion = r["dominant_emotion"]
             color = EMOTION_COLORS.get(emotion, (200, 200, 200))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            label = f"{emotion.upper()} {r['confidence']:.0f}%"
+            label = f"{emotion.upper()} {r['confidence']:.0f}%" if emotion != "unknown" \
+                else "FACE (emotion model not installed)"
             cv2.putText(frame, label, (x1, max(0, y1-6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
         return frame

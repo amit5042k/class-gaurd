@@ -42,7 +42,7 @@ class DahuaAPI:
     def ptz_control(self, channel: int, action: str, speed: int = 5) -> bool:
         code_map = {
             "up": "Up", "down": "Down", "left": "Left", "right": "Right",
-            "zoom_in": "ZoomWide", "zoom_out": "ZoomTele",
+            "zoom_in": "ZoomTele", "zoom_out": "ZoomWide",
         }
         code = code_map.get(action)
         if not code:

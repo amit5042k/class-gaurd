@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from app.core.camera_manager import CameraManager
 from app.config import Config
+from app.ui.styles import style_table
 
 NVR_COLS = ["ID", "Name", "Brand", "Host", "Port", "Channels", "Location", "Status", "Actions"]
 
@@ -109,6 +110,8 @@ class NVRManagement(QWidget):
         root.addWidget(sub)
 
         self._table = QTableWidget(0, len(NVR_COLS))
+
+        style_table(self._table)
         self._table.setHorizontalHeaderLabels(NVR_COLS)
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents

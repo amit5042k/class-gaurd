@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -e
-echo "=== ClassGuard Installation ==="
+cd "$(dirname "$0")"
+echo "=== ClassGuard installation ==="
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
-
-# Optional: full AI stack (face recognition needs cmake + dlib build tools)
-read -p "Install AI features (face recognition + DeepFace)? [y/N] " ans
-if [[ "$ans" =~ ^[Yy]$ ]]; then
-    pip install cmake
-    pip install dlib
-    pip install face-recognition deepface scipy
+read -r -p "Install face recognition (needed for attendance)? [Y/n] " ans
+if [[ ! "$ans" =~ ^[Nn]$ ]]; then
+    python -m pip install "setuptools<81" dlib-bin face_recognition_models Click Pillow
+    python -m pip install --no-deps face_recognition
 fi
-
-echo ""
-echo "Installation complete. Run: python3 main.py"
+read -r -p "Install emotion analysis (DeepFace, ~1 GB)? [y/N] " ans
+if [[ "$ans" =~ ^[Yy]$ ]]; then
+    python -m pip install deepface tf-keras
+fi
+echo
+echo "Done. Start the app with: ./run.sh"

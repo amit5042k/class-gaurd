@@ -1,9 +1,22 @@
+import json
+import logging
 import os
+from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
+
+_URL_BREAKING = "%@:/#? "
+
+
+def _escape(value: str) -> str:
+    # Only escape characters that break URL parsing, so ordinary passwords
+    # are sent unchanged to cameras whose RTSP stack doesn't decode %XX.
+    return "".join(quote(c, safe="") if c in _URL_BREAKING else c for c in value)
 
 
 class Config:
     APP_NAME = "ClassGuard - Camera Management System"
-    VERSION = "1.0.0"
+    VERSION = "1.1.0"
 
     DATA_DIR = os.path.join(os.path.expanduser("~"), ".classguard")
     DB_PATH = os.path.join(DATA_DIR, "classguard.db")
@@ -11,6 +24,7 @@ class Config:
     RECORDINGS_DIR = os.path.join(DATA_DIR, "recordings")
     SNAPSHOTS_DIR = os.path.join(DATA_DIR, "snapshots")
     LOGS_DIR = os.path.join(DATA_DIR, "logs")
+    SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 
     CAMERA_BRANDS = ["Hikvision", "Dahua", "UNV", "CP Plus", "ONVIF", "Generic RTSP"]
     CAMERA_TYPES = ["IP Camera", "NVR Channel", "DVR Channel", "PTZ Camera", "Fisheye"]
@@ -30,34 +44,81 @@ class Config:
 
     EXPRESSIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
     ALERT_EXPRESSIONS = ["angry", "fear", "disgust"]
-
-    SAFETY_VIOLATION_CLASSES = ["no_helmet", "no_mask", "no_vest", "no_gloves"]
-    SAFETY_PPE_CLASSES = ["helmet", "mask", "vest", "gloves", "goggles"]
+    EXPRESSION_ALERT_CONFIDENCE = 60.0
 
     GRID_LAYOUTS = [(1, 1), (2, 2), (3, 3), (4, 4), (2, 3), (3, 4)]
     MAX_CAMERAS_DISPLAY = 16
 
-    HIKVISION_RTSP = "rtsp://{user}:{password}@{host}:{port}/Streaming/Channels/{channel}01"
-    DAHUA_RTSP     = "rtsp://{user}:{password}@{host}:{port}/cam/realmonitor?channel={channel}&subtype=0"
-    UNV_RTSP       = "rtsp://{user}:{password}@{host}:{port}/media/video{channel}"
-    CPPLUS_RTSP    = "rtsp://{user}:{password}@{host}:{port}/h264Preview_01_main"
-    ONVIF_RTSP     = "rtsp://{user}:{password}@{host}:{port}/stream1"
-    GENERIC_RTSP   = "rtsp://{user}:{password}@{host}:{port}/stream"
+    # AI pipeline cadence (seconds between analyses of the same camera)
+    FACE_INTERVAL = 1.0
+    EXPRESSION_INTERVAL = 1.0
+    SAFETY_INTERVAL = 0.5
+    EXPRESSION_LOG_INTERVAL = 10.0
+    ALERT_COOLDOWN = 60.0
 
+    # Attendance
+    SHIFT_START = "09:00"
+    LATE_GRACE_MINUTES = 10
+    ATTENDANCE_MIN_UPDATE_SECS = 30
+    WEEKLY_OFF_DAYS = [6]  # Monday=0 ... Sunday=6
+
+    # Behaviour
+    AUTO_START_STREAMS = False
+    ALERT_SOUND = True
+    ALERT_UNKNOWN_FACES = False
+    SAFETY_MODEL = {}  # {"weights": ..., "cfg": ..., "names": ...}
+
+    PERSISTED_KEYS = [
+        "FACE_RECOGNITION_THRESHOLD", "STREAM_RECONNECT_DELAY", "RECORDING_FPS",
+        "SHIFT_START", "LATE_GRACE_MINUTES", "WEEKLY_OFF_DAYS", "AUTO_START_STREAMS",
+        "ALERT_SOUND", "ALERT_UNKNOWN_FACES", "ALERT_COOLDOWN",
+        "EXPRESSION_ALERT_CONFIDENCE", "SAFETY_MODEL",
+    ]
+
+    # {stream}: Hikvision 01 = main / 02 = sub; {sub}: Dahua & UNV 0 = main / 1 = sub.
+    # CP Plus cameras and recorders are Dahua-based and use the Dahua path.
     RTSP_TEMPLATES = {
-        "Hikvision":   HIKVISION_RTSP,
-        "Dahua":       DAHUA_RTSP,
-        "UNV":         UNV_RTSP,
-        "CP Plus":     CPPLUS_RTSP,
-        "ONVIF":       ONVIF_RTSP,
-        "Generic RTSP": GENERIC_RTSP,
+        "Hikvision":    "rtsp://{auth}{host}:{port}/Streaming/Channels/{channel}{stream}",
+        "Dahua":        "rtsp://{auth}{host}:{port}/cam/realmonitor?channel={channel}&subtype={sub}",
+        "CP Plus":      "rtsp://{auth}{host}:{port}/cam/realmonitor?channel={channel}&subtype={sub}",
+        "UNV":          "rtsp://{auth}{host}:{port}/unicast/c{channel}/s{sub}/live",
+        "ONVIF":        "rtsp://{auth}{host}:{port}/stream1",
+        "Generic RTSP": "rtsp://{auth}{host}:{port}/stream",
     }
 
     @classmethod
-    def build_rtsp_url(cls, brand: str, host: str, port: int,
-                       user: str, password: str, channel: int = 1) -> str:
-        template = cls.RTSP_TEMPLATES.get(brand, cls.GENERIC_RTSP)
+    def build_rtsp_url(cls, brand: str, host: str, port: int, user: str,
+                       password: str, channel: int = 1,
+                       substream: bool = False) -> str:
+        template = cls.RTSP_TEMPLATES.get(brand, cls.RTSP_TEMPLATES["Generic RTSP"])
+        auth = ""
+        if user:
+            # '@', ':' or '/' in credentials would otherwise break the URL.
+            auth = f"{_escape(user)}:{_escape(password or '')}@"
         return template.format(
-            user=user, password=password,
-            host=host, port=port, channel=channel
+            auth=auth, host=host, port=port, channel=channel,
+            stream="02" if substream else "01", sub=1 if substream else 0,
         )
+
+    @classmethod
+    def load_settings(cls):
+        try:
+            with open(cls.SETTINGS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.error("Could not read settings: %s", e)
+            return
+        for key in cls.PERSISTED_KEYS:
+            if key in data:
+                setattr(cls, key, data[key])
+
+    @classmethod
+    def save_settings(cls):
+        os.makedirs(cls.DATA_DIR, exist_ok=True)
+        data = {k: getattr(cls, k) for k in cls.PERSISTED_KEYS}
+        tmp = cls.SETTINGS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, cls.SETTINGS_PATH)

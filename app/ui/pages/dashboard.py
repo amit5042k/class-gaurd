@@ -54,7 +54,7 @@ class Dashboard(QWidget):
         grid = QGridLayout()
         grid.setSpacing(12)
         self._s_cameras   = StatCard("Total Cameras",    "0", "#3498db")
-        self._s_active    = StatCard("Active Streams",   "0", "#27ae60")
+        self._s_active    = StatCard("Connected Cameras", "0", "#27ae60")
         self._s_persons   = StatCard("Enrolled Persons", "0", "#9b59b6")
         self._s_alerts    = StatCard("Unread Alerts",    "0", "#ef4565")
         self._s_attend    = StatCard("Today Attendance", "0", "#f39c12")

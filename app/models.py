@@ -22,6 +22,7 @@ class Camera(Base):
     password        = Column(String(200), default="")
     channel         = Column(Integer, default=1)
     rtsp_url        = Column(String(600))
+    use_substream   = Column(Boolean, default=False)
     onvif_enabled   = Column(Boolean, default=False)
     is_active       = Column(Boolean, default=True)
     location        = Column(String(200))
@@ -32,8 +33,8 @@ class Camera(Base):
     expression_monitor  = Column(Boolean, default=False)
     safety_watch        = Column(Boolean, default=False)
     recording_enabled   = Column(Boolean, default=False)
-    created_at      = Column(DateTime, default=datetime.utcnow)
-    updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at      = Column(DateTime, default=datetime.now)
+    updated_at      = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class NVR(Base):
@@ -49,7 +50,7 @@ class NVR(Base):
     total_channels = Column(Integer, default=4)
     is_active      = Column(Boolean, default=True)
     location       = Column(String(200))
-    created_at     = Column(DateTime, default=datetime.utcnow)
+    created_at     = Column(DateTime, default=datetime.now)
     cameras        = relationship("Camera", backref="nvr", foreign_keys=[Camera.nvr_id])
 
 
@@ -65,7 +66,7 @@ class Person(Base):
     photo_path    = Column(String(500))
     face_encoding = Column(LargeBinary)
     is_active     = Column(Boolean, default=True)
-    created_at    = Column(DateTime, default=datetime.utcnow)
+    created_at    = Column(DateTime, default=datetime.now)
     attendances   = relationship("AttendanceRecord", back_populates="person")
 
 
@@ -91,7 +92,7 @@ class Alert(Base):
     severity         = Column(String(20), default="medium")
     snapshot_path    = Column(String(500))
     is_acknowledged  = Column(Boolean, default=False)
-    created_at       = Column(DateTime, default=datetime.utcnow)
+    created_at       = Column(DateTime, default=datetime.now)
 
 
 class ExpressionLog(Base):
@@ -102,7 +103,16 @@ class ExpressionLog(Base):
     expression    = Column(String(50))
     confidence    = Column(Float)
     snapshot_path = Column(String(500))
-    created_at    = Column(DateTime, default=datetime.utcnow)
+    created_at    = Column(DateTime, default=datetime.now)
+
+
+class Zone(Base):
+    __tablename__ = "zones"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    camera_id  = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    name       = Column(String(100), default="Restricted zone")
+    points     = Column(Text, nullable=False)  # JSON [[x, y], ...] in frame pixels
+    created_at = Column(DateTime, default=datetime.now)
 
 
 class SafetyViolation(Base):
@@ -113,4 +123,4 @@ class SafetyViolation(Base):
     description    = Column(Text)
     snapshot_path  = Column(String(500))
     is_resolved    = Column(Boolean, default=False)
-    created_at     = Column(DateTime, default=datetime.utcnow)
+    created_at     = Column(DateTime, default=datetime.now)

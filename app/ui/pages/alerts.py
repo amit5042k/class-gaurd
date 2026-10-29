@@ -3,8 +3,11 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QComboBox, QMessageBox
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor
+import os
+
+from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices
+from app.ui.styles import style_table
 
 COLS = ["ID", "Camera", "Type", "Description", "Severity", "Time", "Actions"]
 SEVERITY_COLORS = {"high": "#e74c3c", "medium": "#f39c12", "low": "#3498db"}
@@ -41,6 +44,8 @@ class AlertsPage(QWidget):
         root.addLayout(hdr)
 
         self._table = QTableWidget(0, len(COLS))
+
+        style_table(self._table)
         self._table.setHorizontalHeaderLabels(COLS)
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
@@ -75,16 +80,24 @@ class AlertsPage(QWidget):
                                         a.description or "", a.severity or "", ts]):
                     item = QTableWidgetItem(v)
                     if not a.is_acknowledged:
-                        item.setBackground(QColor(color + "22"))
+                        bg = QColor(color)
+                        bg.setAlpha(45)
+                        item.setBackground(bg)
                     self._table.setItem(r, c, item)
 
                 act = QWidget(); al = QHBoxLayout(act); al.setContentsMargins(4,2,4,2)
                 aid = a.id
                 ack_btn = QPushButton("Ack")
-                ack_btn.setObjectName("secondary_btn"); ack_btn.setFixedWidth(44)
+                ack_btn.setObjectName("secondary_btn")
                 ack_btn.setEnabled(not a.is_acknowledged)
                 ack_btn.clicked.connect(lambda _, i=aid: self._acknowledge(i))
                 al.addWidget(ack_btn)
+                if a.snapshot_path and os.path.exists(a.snapshot_path):
+                    photo_btn = QPushButton("Photo")
+                    photo_btn.setObjectName("secondary_btn")
+                    photo_btn.clicked.connect(lambda _, p=a.snapshot_path:
+                                              QDesktopServices.openUrl(QUrl.fromLocalFile(p)))
+                    al.addWidget(photo_btn)
                 self._table.setCellWidget(r, len(COLS)-1, act)
         finally:
             session.close()
@@ -93,7 +106,7 @@ class AlertsPage(QWidget):
         from app.models import Alert
         session = self.db.get_session()
         try:
-            a = session.query(Alert).get(alert_id)
+            a = session.get(Alert, alert_id)
             if a: a.is_acknowledged = True; session.commit()
         finally:
             session.close()

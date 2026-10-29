@@ -42,6 +42,7 @@ class VideoCell(QWidget):
         self._rec_lbl.setStyleSheet("color:#e74c3c; font-size:10px;")
         self._rec_lbl.setVisible(False)
 
+        self._status_dot.setVisible(bool(self.camera_name))
         tl.addWidget(self._status_dot)
         tl.addWidget(self._name_lbl)
         tl.addStretch()
@@ -52,8 +53,11 @@ class VideoCell(QWidget):
         self._canvas = QLabel()
         self._canvas.setObjectName("video_canvas")
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                   QSizePolicy.Policy.Expanding)
+        # Ignored: otherwise each scaled frame enlarges the label's size hint
+        # and the tiles keep growing.
+        self._canvas.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                   QSizePolicy.Policy.Ignored)
+        self._canvas.setMinimumSize(1, 1)
         self._canvas.setText("No Signal")
         self._canvas.setStyleSheet("color:#444; font-size:13px;")
         root.addWidget(self._canvas)
@@ -62,11 +66,13 @@ class VideoCell(QWidget):
     def update_frame(self, camera_id: int, img: QImage):
         if camera_id != self.camera_id:
             return
+        if not self._connected:
+            self.set_status(True)
         pixmap = QPixmap.fromImage(img)
         self._canvas.setPixmap(
             pixmap.scaled(self._canvas.size(),
                           Qt.AspectRatioMode.KeepAspectRatio,
-                          Qt.TransformationMode.SmoothTransformation)
+                          Qt.TransformationMode.FastTransformation)
         )
 
     def set_status(self, connected: bool, msg: str = ""):
@@ -78,9 +84,9 @@ class VideoCell(QWidget):
         else:
             self._status_dot.setObjectName("disconnected_dot")
             self._status_dot.setStyleSheet("color:#ef4565; font-size:14px;")
+            self._canvas.setPixmap(QPixmap())  # clears text too, so do it first
             self._canvas.setText(f"Disconnected\n{msg}")
             self._canvas.setStyleSheet("color:#555; font-size:12px;")
-            self._canvas.setPixmap(QPixmap())
 
     def set_recording(self, recording: bool):
         self._recording = recording

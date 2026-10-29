@@ -1,0 +1,16 @@
+# Optional AI features. Install with install.sh / install.bat, or:
+#   pip install -r requirements-ai.txt
+#   pip install --no-deps face_recognition
+# dlib-bin is a prebuilt dlib (no CMake / Visual Studio needed).
+# face_recognition itself is installed with --no-deps because it declares a
+# dependency on "dlib", which would trigger a slow source build.
+# face_recognition_models imports pkg_resources (from setuptools < 81).
+setuptools<81
+dlib-bin>=19.24
+face_recognition_models>=0.3.0
+Click>=6.0
+Pillow>=9.4
+# Emotion analysis (large download: TensorFlow ~500 MB; model weights are
+# fetched from GitHub on first use, so the PC needs internet access once).
+deepface>=0.0.89
+tf-keras

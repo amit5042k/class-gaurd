@@ -23,12 +23,11 @@ class CameraGrid(QWidget):
         self._rebuild_grid()
 
     def set_cameras(self, cameras: List[Dict]):
-        # clear old
         for i in reversed(range(self._layout.count())):
             w = self._layout.itemAt(i).widget()
             if w:
                 self._layout.removeWidget(w)
-                w.setParent(None)
+                w.deleteLater()
         self._cells.clear()
 
         for i, cam in enumerate(cameras[: self._rows * self._cols]):
@@ -41,7 +40,7 @@ class CameraGrid(QWidget):
 
         # fill remaining slots with empty placeholders
         total = self._rows * self._cols
-        for j in range(len(cameras), total):
+        for j in range(min(len(cameras), total), total):
             ph = VideoCell(-j, "")
             r, c = divmod(j, self._cols)
             self._layout.addWidget(ph, r, c)
