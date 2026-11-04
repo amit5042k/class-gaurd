@@ -135,9 +135,12 @@ def _gst_python():
     candidates = [os.environ.get("CLASSGUARD_GST_PYTHON"), "/usr/bin/python3",
                   "/usr/bin/python3.12", shutil.which("python3")]
     for exe in filter(None, candidates):
-        ok = subprocess.run([exe, "-c", "import gi; gi.require_version('GstRtspServer',"
-                             "'1.0'); from gi.repository import GstRtspServer"],
-                            capture_output=True).returncode == 0
+        try:
+            ok = subprocess.run([exe, "-c", "import gi; gi.require_version('GstRtspServer',"
+                                 "'1.0'); from gi.repository import GstRtspServer"],
+                                capture_output=True, timeout=30).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            continue  # interpreter not present (e.g. on Windows)
         if ok:
             return exe
     return None
