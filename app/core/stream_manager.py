@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 OPEN_TIMEOUT_MS = 10_000
 READ_TIMEOUT_MS = 10_000
 DISPLAY_MAX_WIDTH = 1280
+DISPLAY_FPS = 15  # screen refresh cap; recording and AI still get every frame
 
 
 def open_capture(source: str) -> cv2.VideoCapture:
@@ -51,10 +52,12 @@ class StreamThread(QThread):
         self._listeners = listeners
         self._base_delay = max(1.0, float(reconnect_delay))
         self._running = False
+        self.last_frame = None
 
     def run(self):
         self._running = True
         delay = self._base_delay
+        last_display = 0.0
         while self._running:
             cap = None
             try:
@@ -68,13 +71,17 @@ class StreamThread(QThread):
                         ok, frame = cap.read()
                         if not ok or frame is None:
                             break
+                        self.last_frame = frame
                         for listener in list(self._listeners):
                             try:
                                 listener(self.camera_id, frame)
                             except Exception:
                                 logger.exception("Frame listener failed")
-                        self.frame_ready.emit(
-                            self.camera_id, to_qimage(frame, DISPLAY_MAX_WIDTH))
+                        now = time.monotonic()
+                        if now - last_display >= 1 / DISPLAY_FPS:
+                            last_display = now
+                            self.frame_ready.emit(
+                                self.camera_id, to_qimage(frame, DISPLAY_MAX_WIDTH))
                     if self._running:
                         self.status_changed.emit(self.camera_id, False, "Stream lost")
             except Exception as e:
@@ -158,6 +165,10 @@ class StreamManager:
     def is_streaming(self, camera_id: int) -> bool:
         t = self._streams.get(camera_id)
         return t is not None and t.isRunning()
+
+    def latest_frame(self, camera_id: int) -> Optional[np.ndarray]:
+        t = self._streams.get(camera_id)
+        return t.last_frame if t is not None and t.isRunning() else None
 
     def active_count(self) -> int:
         return sum(1 for t in self._streams.values() if t.isRunning())

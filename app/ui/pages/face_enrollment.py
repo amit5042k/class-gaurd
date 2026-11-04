@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 )
 from sqlalchemy.exc import IntegrityError
 
+from app.core.security import audit
 from app.core.face_engine import FaceEngine, decode_encodings
 from app.core.stream_manager import to_qimage
 from app.ui.async_task import run_async
@@ -197,6 +198,7 @@ class FaceEnrollment(QWidget):
             session.add(p)
             session.commit()
             self._selected_pid = p.id
+            audit(self.db, "person_add", p.name)
         except IntegrityError:
             session.rollback()
             QMessageBox.warning(self, "Duplicate", "Another person already has that Employee / Roll No.")
@@ -250,6 +252,7 @@ class FaceEnrollment(QWidget):
                 if p.employee_id:
                     p.employee_id = None  # frees the ID for re-use
                 session.commit()
+                audit(self.db, "person_remove", p.name)
         finally:
             session.close()
         self.refresh()
@@ -264,6 +267,7 @@ class FaceEnrollment(QWidget):
             if p:
                 p.face_encoding = None
                 session.commit()
+                audit(self.db, "face_clear", p.name)
         finally:
             session.close()
         self._status.setText("Face photos deleted for this person.")
@@ -349,6 +353,7 @@ class FaceEnrollment(QWidget):
             p.photo_path = self.fe.save_face_photo(frame, pid)
             count = len(decode_encodings(p.face_encoding))
             session.commit()
+            audit(self.db, "face_enroll", f"{p.name} ({count} photo(s))")
         finally:
             session.close()
         self._status.setText(f"Face enrolled. This person now has {count} photo(s).")

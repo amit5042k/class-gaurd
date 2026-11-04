@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="classguard",
-    version="1.1.0",
+    version="2.0.0",
     description="ClassGuard — Multi-brand Camera Management Desktop App",
     packages=find_packages(exclude=["tests"]),
     py_modules=["main"],
@@ -15,6 +15,7 @@ setup(
         "onvif-zeep>=0.2.12",
         "WSDiscovery>=2.0",
         "requests>=2.28.0",
+        "cryptography>=41",
     ],
     extras_require={
         "ai": [

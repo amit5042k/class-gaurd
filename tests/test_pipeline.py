@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import pytest
 
+from app.config import Config
 from tests.conftest import needs_face
 
 
@@ -216,3 +217,32 @@ def test_unreachable_camera_reports_failure_quickly(qtbot):
         assert statuses[0][0] is False and time.monotonic() - t0 < 15
     finally:
         sm.stop_all(wait_ms=5000)
+
+
+def test_rtsp_stream_is_recorded_and_playable(qtbot, db, rtsp_camera, monkeypatch, tmp_path):
+    from app.core.recording import RecordingManager
+    from app.core.stream_manager import StreamManager
+    from app.models import Recording
+    from app.ui.widgets.video_player import VideoPlayer
+    monkeypatch.setattr(Config, "RECORDINGS_DIR", str(tmp_path / "rec"))
+    url, start_server = rtsp_camera
+    start_server()
+    sm = StreamManager()
+    rec = RecordingManager(db)
+    rec.set_cameras([{"id": 5, "recording_mode": "continuous"}])
+    sm.add_frame_listener(rec.on_frame)
+    sm.start_stream(5, url)
+    try:
+        _wait(qtbot, lambda: rec.is_recording(5), 20000)
+        qtbot.wait(3000)
+    finally:
+        sm.stop_all(wait_ms=5000)
+        rec.stop_all()
+    s = db.get_session()
+    row = s.query(Recording).filter(Recording.end_time.isnot(None)).one()
+    s.close()
+    assert (row.end_time - row.start_time).total_seconds() >= 2
+    player = VideoPlayer()
+    qtbot.addWidget(player)
+    assert player.open(row.path, row.start_time, autoplay=False)
+    assert player._frames >= 15 and player._last_frame.shape[1] == 640

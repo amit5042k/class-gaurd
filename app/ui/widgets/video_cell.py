@@ -1,15 +1,14 @@
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSizePolicy, QMenu
-)
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QImage, QCursor
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMenu, QSizePolicy, QVBoxLayout, QWidget
 
 
 class VideoCell(QWidget):
     double_clicked = pyqtSignal(int)   # camera_id
+    clicked = pyqtSignal(int)
     snapshot_requested = pyqtSignal(int)
     fullscreen_requested = pyqtSignal(int)
+    record_toggled = pyqtSignal(int, bool)   # camera_id, start?
 
     def __init__(self, camera_id: int, camera_name: str, parent=None):
         super().__init__(parent)
@@ -17,7 +16,9 @@ class VideoCell(QWidget):
         self.camera_name = camera_name
         self._connected = False
         self._recording = False
+        self._manual = False
         self.setObjectName("video_cell")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._build_ui()
 
@@ -88,15 +89,27 @@ class VideoCell(QWidget):
             self._canvas.setText(f"Disconnected\n{msg}")
             self._canvas.setStyleSheet("color:#555; font-size:12px;")
 
-    def set_recording(self, recording: bool):
+    def set_recording(self, recording: bool, manual: bool = False):
         self._recording = recording
+        self._manual = manual
         self._rec_lbl.setVisible(recording)
+
+    def set_selected(self, selected: bool):
+        self.setStyleSheet("#video_cell{border:2px solid #ffd84a;}" if selected else "")
+
+    def mousePressEvent(self, event):
+        if self.camera_name and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.camera_id)
+        super().mousePressEvent(event)
 
     # ------------------------------------------------------------ mouse
     def mouseDoubleClickEvent(self, event):
-        self.double_clicked.emit(self.camera_id)
+        if self.camera_name:
+            self.double_clicked.emit(self.camera_id)
 
     def contextMenuEvent(self, event):
+        if not self.camera_name:
+            return
         menu = QMenu(self)
         menu.setStyleSheet(
             "QMenu{background:#1b1b30;color:#dde1ec;border:1px solid #252550;}"
@@ -105,7 +118,14 @@ class VideoCell(QWidget):
         menu.addAction("Take Snapshot").triggered.connect(
             lambda: self.snapshot_requested.emit(self.camera_id)
         )
-        menu.addAction("Fullscreen").triggered.connect(
-            lambda: self.fullscreen_requested.emit(self.camera_id)
-        )
+        if self._manual:
+            menu.addAction("Stop manual recording").triggered.connect(
+                lambda: self.record_toggled.emit(self.camera_id, False))
+        else:
+            menu.addAction("Start recording").triggered.connect(
+                lambda: self.record_toggled.emit(self.camera_id, True))
+        menu.addAction("Single view / back to grid  (double-click)").triggered.connect(
+            lambda: self.double_clicked.emit(self.camera_id))
+        menu.addAction("Full screen  (F11)").triggered.connect(
+            lambda: self.fullscreen_requested.emit(self.camera_id))
         menu.exec(event.globalPos())

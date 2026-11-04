@@ -33,6 +33,7 @@ class Camera(Base):
     expression_monitor  = Column(Boolean, default=False)
     safety_watch        = Column(Boolean, default=False)
     recording_enabled   = Column(Boolean, default=False)
+    recording_mode      = Column(String(20), default="off")  # off | continuous | motion
     created_at      = Column(DateTime, default=datetime.now)
     updated_at      = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -106,6 +107,17 @@ class ExpressionLog(Base):
     created_at    = Column(DateTime, default=datetime.now)
 
 
+class Recording(Base):
+    __tablename__ = "recordings"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    camera_id  = Column(Integer, ForeignKey("cameras.id"), nullable=False, index=True)
+    path       = Column(String(600), nullable=False)
+    kind       = Column(String(20), default="continuous")  # continuous | motion | manual
+    start_time = Column(DateTime, nullable=False, index=True)
+    end_time   = Column(DateTime)
+    size_bytes = Column(Integer, default=0)
+
+
 class Zone(Base):
     __tablename__ = "zones"
     id         = Column(Integer, primary_key=True, autoincrement=True)
@@ -124,3 +136,24 @@ class SafetyViolation(Base):
     snapshot_path  = Column(String(500))
     is_resolved    = Column(Boolean, default=False)
     created_at     = Column(DateTime, default=datetime.now)
+
+
+class User(Base):
+    __tablename__ = "users"
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    username      = Column(String(80), unique=True, nullable=False)
+    full_name     = Column(String(120))
+    password_hash = Column(String(300), nullable=False)
+    role          = Column(String(20), nullable=False, default="viewer")
+    is_active     = Column(Boolean, default=True)
+    last_login    = Column(DateTime)
+    created_at    = Column(DateTime, default=datetime.now)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    username   = Column(String(80))
+    action     = Column(String(60))
+    details    = Column(Text)

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -14,9 +15,15 @@ def _escape(value: str) -> str:
     return "".join(quote(c, safe="") if c in _URL_BREAKING else c for c in value)
 
 
+def resource_path(*parts: str) -> str:
+    """Path to a bundled file, both from source and inside a PyInstaller build."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, *parts)
+
+
 class Config:
     APP_NAME = "ClassGuard - Camera Management System"
-    VERSION = "1.1.0"
+    VERSION = "2.0.0"
 
     DATA_DIR = os.path.join(os.path.expanduser("~"), ".classguard")
     DB_PATH = os.path.join(DATA_DIR, "classguard.db")
@@ -41,6 +48,14 @@ class Config:
 
     RECORDING_FPS = 25
     RECORDING_CODEC = "mp4v"
+    RECORDING_SEGMENT_MINUTES = 10
+    RECORDING_RETENTION_DAYS = 30
+    RECORDING_MAX_GB = 200.0
+    RECORDING_MIN_FREE_GB = 5.0
+    RECORDING_MAX_WIDTH = 1280  # 0 = keep original resolution
+    MOTION_SENSITIVITY = "medium"  # low | medium | high
+    MOTION_PRE_ROLL = 3
+    MOTION_POST_ROLL = 10
 
     EXPRESSIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
     ALERT_EXPRESSIONS = ["angry", "fear", "disgust"]
@@ -67,12 +82,16 @@ class Config:
     ALERT_SOUND = True
     ALERT_UNKNOWN_FACES = False
     SAFETY_MODEL = {}  # {"weights": ..., "cfg": ..., "names": ...}
+    AUTO_BACKUP = True
 
     PERSISTED_KEYS = [
         "FACE_RECOGNITION_THRESHOLD", "STREAM_RECONNECT_DELAY", "RECORDING_FPS",
         "SHIFT_START", "LATE_GRACE_MINUTES", "WEEKLY_OFF_DAYS", "AUTO_START_STREAMS",
         "ALERT_SOUND", "ALERT_UNKNOWN_FACES", "ALERT_COOLDOWN",
         "EXPRESSION_ALERT_CONFIDENCE", "SAFETY_MODEL",
+        "RECORDING_SEGMENT_MINUTES", "RECORDING_RETENTION_DAYS", "RECORDING_MAX_GB",
+        "RECORDING_MIN_FREE_GB", "RECORDING_MAX_WIDTH", "MOTION_SENSITIVITY",
+        "MOTION_PRE_ROLL", "MOTION_POST_ROLL", "AUTO_BACKUP",
     ]
 
     # {stream}: Hikvision 01 = main / 02 = sub; {sub}: Dahua & UNV 0 = main / 1 = sub.
@@ -99,6 +118,17 @@ class Config:
             auth=auth, host=host, port=port, channel=channel,
             stream="02" if substream else "01", sub=1 if substream else 0,
         )
+
+    @classmethod
+    def set_data_dir(cls, path: str):
+        """Keep all data in another folder (portable installs, self-test)."""
+        cls.DATA_DIR = os.path.abspath(path)
+        cls.DB_PATH = os.path.join(cls.DATA_DIR, "classguard.db")
+        cls.FACES_DIR = os.path.join(cls.DATA_DIR, "faces")
+        cls.RECORDINGS_DIR = os.path.join(cls.DATA_DIR, "recordings")
+        cls.SNAPSHOTS_DIR = os.path.join(cls.DATA_DIR, "snapshots")
+        cls.LOGS_DIR = os.path.join(cls.DATA_DIR, "logs")
+        cls.SETTINGS_PATH = os.path.join(cls.DATA_DIR, "settings.json")
 
     @classmethod
     def load_settings(cls):

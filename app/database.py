@@ -30,6 +30,7 @@ class Database:
 
         Base.metadata.create_all(self.engine)
         self._add_missing_columns()
+        self._migrate_data()
         self.SessionLocal = sessionmaker(
             bind=self.engine, autocommit=False, autoflush=False,
             expire_on_commit=False,
@@ -57,6 +58,13 @@ class Database:
                         f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}{default}'
                     ))
                     logger.info("Added column %s.%s", table.name, col.name)
+
+    def _migrate_data(self):
+        with self.engine.begin() as conn:
+            # v1.1 had only an on/off recording flag.
+            conn.execute(text("UPDATE cameras SET recording_mode='continuous' "
+                              "WHERE recording_enabled=1 AND "
+                              "(recording_mode IS NULL OR recording_mode='off')"))
 
     def get_session(self) -> Session:
         return self.SessionLocal()

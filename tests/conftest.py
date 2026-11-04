@@ -24,9 +24,13 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "LOGS_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(Config, "SETTINGS_PATH", str(tmp_path / "settings.json"))
     monkeypatch.setattr(Config, "DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setattr(Config, "RECORDINGS_DIR", str(tmp_path / "recordings"))
     for key in ("SHIFT_START", "LATE_GRACE_MINUTES", "WEEKLY_OFF_DAYS",
                 "ALERT_COOLDOWN", "SAFETY_MODEL", "ALERT_UNKNOWN_FACES",
-                "AUTO_START_STREAMS", "FACE_RECOGNITION_THRESHOLD"):
+                "AUTO_START_STREAMS", "FACE_RECOGNITION_THRESHOLD",
+                "RECORDING_SEGMENT_MINUTES", "RECORDING_RETENTION_DAYS", "RECORDING_MAX_GB",
+                "RECORDING_MIN_FREE_GB", "RECORDING_MAX_WIDTH", "MOTION_SENSITIVITY",
+                "MOTION_PRE_ROLL", "MOTION_POST_ROLL"):
         monkeypatch.setattr(Config, key, getattr(Config, key))
     yield
 

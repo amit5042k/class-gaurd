@@ -89,12 +89,14 @@ QHeaderView::section {
 }
 
 /* ── Inputs ──────────────────────────────────── */
-QLineEdit, QComboBox, QSpinBox, QTextEdit, QPlainTextEdit {
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit,
+QTextEdit, QPlainTextEdit {
     background: #252550; color: #dde1ec;
     border: 1px solid #353580; border-radius: 4px;
     padding: 6px 10px; min-height: 28px;
 }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
+QDateEdit:focus, QTimeEdit:focus {
     border: 1px solid #ef4565;
 }
 QComboBox::drop-down { border: none; width: 20px; }
@@ -183,7 +185,7 @@ QStatusBar {
 
 /* ── Dialog ──────────────────────────────────── */
 QDialog { background: #1b1b30; }
-QLabel  { color: #dde1ec; }
+QLabel  { color: #dde1ec; background: transparent; }
 QLabel#form_label { color: #9098b1; font-size: 12px; }
 """
 

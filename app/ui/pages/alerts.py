@@ -5,8 +5,9 @@ from PyQt6.QtWidgets import (
 )
 import os
 
-from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices
+from app.core.security import audit
 from app.ui.styles import style_table
 
 COLS = ["ID", "Camera", "Type", "Description", "Severity", "Time", "Actions"]
@@ -14,9 +15,12 @@ SEVERITY_COLORS = {"high": "#e74c3c", "medium": "#f39c12", "low": "#3498db"}
 
 
 class AlertsPage(QWidget):
+    video_requested = pyqtSignal(int, object)  # camera_id, datetime
+
     def __init__(self, db, parent=None):
         super().__init__(parent)
         self.db = db
+        self._can_ack = True
         self._build_ui()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
@@ -37,10 +41,10 @@ class AlertsPage(QWidget):
         self._filter.addItems(["All", "Unread", "High", "Medium", "Low"])
         self._filter.currentIndexChanged.connect(self.refresh)
         hdr.addWidget(self._filter)
-        btn_ack_all = QPushButton("Acknowledge All")
-        btn_ack_all.setObjectName("secondary_btn")
-        btn_ack_all.clicked.connect(self._ack_all)
-        hdr.addWidget(btn_ack_all)
+        self._btn_ack_all = QPushButton("Acknowledge All")
+        self._btn_ack_all.setObjectName("secondary_btn")
+        self._btn_ack_all.clicked.connect(self._ack_all)
+        hdr.addWidget(self._btn_ack_all)
         root.addLayout(hdr)
 
         self._table = QTableWidget(0, len(COLS))
@@ -89,7 +93,7 @@ class AlertsPage(QWidget):
                 aid = a.id
                 ack_btn = QPushButton("Ack")
                 ack_btn.setObjectName("secondary_btn")
-                ack_btn.setEnabled(not a.is_acknowledged)
+                ack_btn.setEnabled(not a.is_acknowledged and self._can_ack)
                 ack_btn.clicked.connect(lambda _, i=aid: self._acknowledge(i))
                 al.addWidget(ack_btn)
                 if a.snapshot_path and os.path.exists(a.snapshot_path):
@@ -98,18 +102,33 @@ class AlertsPage(QWidget):
                     photo_btn.clicked.connect(lambda _, p=a.snapshot_path:
                                               QDesktopServices.openUrl(QUrl.fromLocalFile(p)))
                     al.addWidget(photo_btn)
+                if a.camera_id and a.created_at:
+                    video_btn = QPushButton("Video")
+                    video_btn.setObjectName("secondary_btn")
+                    video_btn.setToolTip("Play the recording around this alert")
+                    video_btn.clicked.connect(lambda _, c=a.camera_id, t=a.created_at:
+                                              self.video_requested.emit(c, t))
+                    al.addWidget(video_btn)
                 self._table.setCellWidget(r, len(COLS)-1, act)
         finally:
             session.close()
+
+    def set_permissions(self, user):
+        self._can_ack = user.can_operate
+        self._btn_ack_all.setEnabled(self._can_ack)
+        self.refresh()
 
     def _acknowledge(self, alert_id: int):
         from app.models import Alert
         session = self.db.get_session()
         try:
             a = session.get(Alert, alert_id)
-            if a: a.is_acknowledged = True; session.commit()
+            if a:
+                a.is_acknowledged = True
+                session.commit()
         finally:
             session.close()
+        audit(self.db, "alert_ack", f"Acknowledged alert {alert_id}")
         self.refresh()
 
     def _ack_all(self):
@@ -122,4 +141,5 @@ class AlertsPage(QWidget):
             session.commit()
         finally:
             session.close()
+        audit(self.db, "alert_ack", "Acknowledged all alerts")
         self.refresh()

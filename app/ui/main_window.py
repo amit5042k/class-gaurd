@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QStackedWidget, QStatusBar, QWidget
 )
@@ -10,7 +10,7 @@ from app.config import Config
 from app.core.ai_worker import AIWorker
 from app.core.camera_manager import CameraManager
 from app.core.face_engine import FaceEngine
-from app.core.recording import Recorder
+from app.core.recording import MODE_OFF, RecordingManager, find_recording_at
 from app.core.stream_manager import StreamManager
 from app.ui.pages.alerts import AlertsPage
 from app.ui.pages.attendance import AttendancePage
@@ -23,15 +23,25 @@ from app.ui.pages.nvr_management import NVRManagement
 from app.ui.pages.recordings import RecordingsPage
 from app.ui.pages.safety_watch import SafetyWatch, load_all_zones
 from app.ui.pages.settings import SettingsPage
+from app.ui.pages.users import UsersPage
+from app.core.security import ROLE_LABELS, PAGES, CurrentUser, Session, UserService, audit
 from app.ui.styles import DARK
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.widgets.toast import ToastStack
 
 
+class _Bridge(QObject):
+    """Carries callbacks from worker threads onto the UI thread."""
+    rec_state = pyqtSignal(int, bool)
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, db):
+    def __init__(self, db, user: CurrentUser = None):
         super().__init__()
         self.db = db
+        # Tests and tools may open the window without signing in: act as admin.
+        self.user = user or CurrentUser(0, "admin", "admin", "")
+        Session.current = self.user
         self.setWindowTitle(Config.APP_NAME)
         self.setMinimumSize(1280, 780)
         self.resize(1440, 860)
@@ -40,9 +50,11 @@ class MainWindow(QMainWindow):
         self.stream_mgr = StreamManager()
         self.stream_mgr.reconnect_delay = Config.STREAM_RECONNECT_DELAY
         self.face_engine = FaceEngine(Config.FACES_DIR)
-        self.recorder = Recorder()
+        self._bridge = _Bridge()
+        self.recorder = RecordingManager(db, on_state=self._bridge.rec_state.emit)
         self.ai = AIWorker(db, self.face_engine)
         self.stream_mgr.add_frame_listener(self.ai.submit_frame)
+        self.stream_mgr.add_frame_listener(self.recorder.on_frame)
         self.toasts = ToastStack(self)
 
         self._build_ui()
@@ -53,9 +65,11 @@ class MainWindow(QMainWindow):
         if Config.SAFETY_MODEL:
             self.ai.request_model(dict(Config.SAFETY_MODEL))
         self.ai.start()
-        self._sidebar.set_active("dashboard")
+        self.recorder.start_cleanup()
+        self.apply_user(self.user)
+        QTimer.singleShot(500, self._start_background_streams)
         if Config.AUTO_START_STREAMS:
-            QTimer.singleShot(500, self._p_live.start_all_streams)
+            QTimer.singleShot(600, self._p_live.start_all_streams)
 
     # ----------------------------------------------------------------- build
     def _build_ui(self):
@@ -78,8 +92,9 @@ class MainWindow(QMainWindow):
         self._p_expr = ExpressionMonitor(self.db)
         self._p_safety = SafetyWatch(self.db)
         self._p_alerts = AlertsPage(self.db)
-        self._p_rec = RecordingsPage()
-        self._p_settings = SettingsPage()
+        self._p_rec = RecordingsPage(self.db)
+        self._p_settings = SettingsPage(self.db)
+        self._p_users = UsersPage(self.db)
 
         self._pages = {}
         for key, page in [
@@ -88,7 +103,7 @@ class MainWindow(QMainWindow):
             ("face_enrollment", self._p_faces), ("attendance", self._p_attend),
             ("expression", self._p_expr), ("safety", self._p_safety),
             ("alerts", self._p_alerts), ("recordings", self._p_rec),
-            ("settings", self._p_settings),
+            ("settings", self._p_settings), ("users", self._p_users),
         ]:
             self._stack.addWidget(page)
             self._pages[key] = page
@@ -115,8 +130,11 @@ class MainWindow(QMainWindow):
         self._p_live.active_count_changed.connect(self._on_stream_count)
         self._p_live.message.connect(lambda m: self.statusBar().showMessage(m, 6000))
         self._p_cameras.cameras_changed.connect(self._load_data)
+        self._p_nvr.cameras_changed.connect(self._load_data)
+        self._p_nvr.cameras_changed.connect(self._p_cameras.refresh)
         self._p_faces.faces_changed.connect(self._update_ai_label)
         self._p_settings.settings_saved.connect(self._on_settings_saved)
+        self._p_settings.restart_requested.connect(self._restart)
 
         for page in (self._p_expr, self._p_safety):
             page.monitor_changed.connect(self._on_monitor_changed)
@@ -131,12 +149,59 @@ class MainWindow(QMainWindow):
         self.ai.attendance_event.connect(self._on_attendance_event)
         self.ai.alert_created.connect(self._on_alert)
 
+        self._bridge.rec_state.connect(self._p_live.set_recording_state)
+        self._p_live.record_requested.connect(self._on_record_requested)
+        self._p_live.fullscreen_requested.connect(self._toggle_fullscreen)
+        self._p_alerts.video_requested.connect(self._play_alert_video)
+        self._sidebar.lock_requested.connect(self.lock)
+        self._sidebar.password_requested.connect(self._change_password)
+        QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
+        QShortcut(QKeySequence("Esc"), self, activated=self._exit_fullscreen)
+
     # ------------------------------------------------------------ handlers
+    # -------------------------------------------------------------- users
+    def apply_user(self, user: CurrentUser):
+        self.user = user
+        Session.current = user
+        allowed = PAGES.get(user.role, set())
+        self._sidebar.set_allowed(allowed)
+        self._sidebar.set_user(user.full_name or user.username,
+                               ROLE_LABELS.get(user.role, user.role))
+        for page in self._pages.values():
+            if hasattr(page, "set_permissions"):
+                page.set_permissions(user)
+        current = next((k for k, p in self._pages.items()
+                        if p is self._stack.currentWidget()), None)
+        if current not in allowed or not getattr(self, "_shown_once", False):
+            self._shown_once = True
+            self._sidebar.set_active("dashboard")
+
+    def lock(self):
+        from app.ui.login import LoginDialog
+        audit(self.db, "lock", f"{self.user.username} locked the screen")
+        self._exit_fullscreen()
+        dlg = LoginDialog(UserService(self.db), self, locked=True)
+        if dlg.exec() and dlg.user:
+            self.apply_user(dlg.user)
+        else:
+            self.close()
+
+    def _change_password(self):
+        from app.ui.login import ChangePasswordDialog
+        if self.user.id == 0:
+            return
+        if ChangePasswordDialog(UserService(self.db), self.user, self).exec():
+            audit(self.db, "password_change", f"{self.user.username} changed their password")
+            self.statusBar().showMessage("Password changed.", 5000)
+
     def _navigate(self, key: str):
+        if not self.user.can(key):
+            return
         page = self._pages.get(key)
         if page:
             self._stack.setCurrentWidget(page)
-            if hasattr(page, "refresh") and key in ("dashboard", "attendance", "alerts"):
+            if hasattr(page, "refresh") and key in ("dashboard", "attendance", "alerts",
+                                                    "users", "recordings"):
                 page.refresh()
 
     def _load_data(self):
@@ -144,7 +209,9 @@ class MainWindow(QMainWindow):
         self._p_live.load_cameras(cameras)
         self._p_expr.set_cameras(cameras)
         self._p_safety.set_cameras(cameras)
+        self._p_rec.set_cameras(cameras)
         self.ai.set_cameras(cameras)
+        self.recorder.set_cameras(cameras)
         active_ids = {c["id"] for c in cameras}
         for cid in list(getattr(self, "_known_cams", set()) - active_ids):
             self.ai.clear_camera(cid)
@@ -152,6 +219,59 @@ class MainWindow(QMainWindow):
         self._sidebar.update_camera_count(len(cameras))
         self._sb_cams.setText(f"Cameras: {len(cameras)}")
         self._update_ai_label(cameras)
+        self._cameras = cameras
+        if getattr(self, "_started", False):
+            self._start_background_streams()
+
+    def _start_background_streams(self):
+        """Cameras that record or run AI need their stream even when nobody is
+        watching Live View, like an NVR."""
+        self._started = True
+        for cam in self._cameras:
+            needed = (cam.get("recording_mode") or MODE_OFF) != MODE_OFF or any(
+                cam.get(k) for k in ("attendance_tracking", "face_detection",
+                                     "expression_monitor", "safety_watch"))
+            if needed and not self.stream_mgr.is_streaming(cam["id"]):
+                self._p_live.start_camera(cam["id"])
+
+    def _on_record_requested(self, camera_id: int, on: bool):
+        if not self.user.can_operate:
+            return
+        self.recorder.set_manual(camera_id, on)
+        audit(self.db, "record_start" if on else "record_stop", f"Camera {camera_id}")
+        if on and not self.stream_mgr.is_streaming(camera_id):
+            self._p_live.start_camera(camera_id)
+        self._p_live.set_recording_state(camera_id, self.recorder.is_recording(camera_id) or on)
+        self.statusBar().showMessage("Manual recording started." if on
+                                     else "Manual recording stopped.", 5000)
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self._exit_fullscreen()
+            return
+        self._sidebar.set_active("live_view")
+        self._sidebar.hide()
+        self.statusBar().hide()
+        self._p_live.set_chrome_visible(False)
+        self.showFullScreen()
+
+    def _exit_fullscreen(self):
+        if not self.isFullScreen():
+            return
+        self._sidebar.show()
+        self.statusBar().show()
+        self._p_live.set_chrome_visible(True)
+        self.showNormal()
+
+    def _play_alert_video(self, camera_id: int, when):
+        hit = find_recording_at(self.db, camera_id, when)
+        if not hit:
+            self.statusBar().showMessage(
+                "No finished recording covers that time for this camera.", 8000)
+            return
+        self._sidebar.set_active("recordings")
+        self._p_rec.open_recording(camera_id, hit["path"], hit["start"],
+                                   max(0.0, hit["offset"] - 5))
 
     def _on_monitor_changed(self, kind: str, camera_id):
         self.ai.set_monitor(kind, camera_id)
@@ -183,7 +303,14 @@ class MainWindow(QMainWindow):
             self._p_alerts.refresh()
         self._p_dashboard.refresh()
 
+    def _restart(self):
+        from app.ui.restart import restart_app
+        self.close()
+        restart_app()
+        QApplication.instance().quit()
+
     def _on_settings_saved(self):
+        audit(self.db, "settings", "Settings saved")
         self.stream_mgr.reconnect_delay = Config.STREAM_RECONNECT_DELAY
         self._p_attend.refresh()
 
@@ -203,7 +330,10 @@ class MainWindow(QMainWindow):
         self.toasts.relayout()
 
     def closeEvent(self, event: QCloseEvent):
+        audit(self.db, "exit", f"{self.user.username} closed ClassGuard")
+        self._p_live.ptz.shutdown()
+        self._p_rec.player.close_file()
         self.stream_mgr.stop_all(wait_ms=3000)
-        self.ai.stop()
         self.recorder.stop_all()
+        self.ai.stop()
         event.accept()

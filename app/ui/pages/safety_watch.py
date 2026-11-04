@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget
 )
 
+from app.core.security import audit
 from app.config import Config
 from app.ui.widgets.zone_canvas import VideoCanvas
 from app.ui.styles import style_table
@@ -261,6 +262,7 @@ class SafetyWatch(QWidget):
             session.commit()
         finally:
             session.close()
+        audit(self.db, "zone_add", f"Camera id {self._active}")
         self.zones_changed.emit(self._active, load_zones(self.db, self._active))
         self._update_zone_buttons()
 
@@ -278,6 +280,7 @@ class SafetyWatch(QWidget):
             session.commit()
         finally:
             session.close()
+        audit(self.db, "zone_clear", f"Camera id {self._active}")
         self.zones_changed.emit(self._active, [])
         self._update_zone_buttons()
 
@@ -315,6 +318,7 @@ class SafetyWatch(QWidget):
             return
         Config.SAFETY_MODEL = {"weights": weights, "cfg": cfg, "names": names}
         Config.save_settings()
+        audit(self.db, "model_load", os.path.basename(weights))
         self._update_model_label("Loading…")
         self.model_requested.emit(dict(Config.SAFETY_MODEL))
 

@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget
 )
 
+from app.core.security import audit
 from app.config import Config
 from app.core.camera_manager import CameraManager
 from app.protocols.generic_rtsp import RTSPProbe
@@ -85,7 +86,15 @@ class CameraDialog(QDialog):
         form.addRow(lbl(""), self._sub)
         form.addRow(lbl("Location:"), self._loc)
         form.addRow(lbl("Group:"), self._group)
-        form.addRow(lbl("Custom RTSP URL:"), self._rtsp)
+        rtsp_row = QHBoxLayout()
+        rtsp_row.addWidget(self._rtsp, 1)
+        self._btn_onvif = QPushButton("Get from camera (ONVIF)")
+        self._btn_onvif.setObjectName("secondary_btn")
+        self._btn_onvif.setToolTip("Ask the camera for its stream address over ONVIF "
+                                   "(uses the HTTP port)")
+        self._btn_onvif.clicked.connect(self._fetch_onvif)
+        rtsp_row.addWidget(self._btn_onvif)
+        form.addRow(lbl("Custom RTSP URL:"), rtsp_row)
         form.addRow(lbl(""), self._url_hint)
         form.addRow(lbl(""), self._active)
         layout.addLayout(form)
@@ -104,12 +113,19 @@ class CameraDialog(QDialog):
         self._attend = QCheckBox("Attendance Tracking")
         self._expr = QCheckBox("Expression Monitor")
         self._safety = QCheckBox("Safety Watch")
-        self._rec = QCheckBox("Auto Recording (coming soon)")
-        self._rec.setEnabled(False)
-        for i, cb in enumerate([self._face_det, self._attend, self._expr,
-                                self._safety, self._rec]):
+        for i, cb in enumerate([self._face_det, self._attend, self._expr, self._safety]):
             gl.addWidget(cb, i // 2, i % 2)
         layout.addWidget(gb)
+
+        rb = QGroupBox("Recording")
+        rl = QHBoxLayout(rb)
+        self._rec_mode = QComboBox()
+        for label, mode in (("Off", "off"), ("Continuous (24×7)", "continuous"),
+                            ("Only when motion is detected", "motion")):
+            self._rec_mode.addItem(label, mode)
+        rl.addWidget(QLabel("Record:"))
+        rl.addWidget(self._rec_mode, 1)
+        layout.addWidget(rb)
 
         btn_row = QHBoxLayout()
         self._test_btn = QPushButton("Test Connection")
@@ -147,14 +163,19 @@ class CameraDialog(QDialog):
         self._active.setChecked(d.get("is_active", True) is not False)
         self._loc.setText(d.get("location", ""))
         self._group.setText(d.get("group_name", "Default"))
-        stored = d.get("rtsp_url") or ""
-        # Only show a URL here if it was custom; auto-built ones are regenerated.
-        if stored and d.get("host") and stored != CameraManager.auto_url(d):
-            self._rtsp.setText(stored)
+        # Only a custom URL is shown here; automatic ones are rebuilt from the fields.
+        if "custom_rtsp_url" in d:
+            self._rtsp.setText(d["custom_rtsp_url"] or "")
+        else:
+            stored = d.get("rtsp_url") or ""
+            if stored and d.get("host") and stored != CameraManager.auto_url(d):
+                self._rtsp.setText(stored)
         self._face_det.setChecked(bool(d.get("face_detection")))
         self._attend.setChecked(bool(d.get("attendance_tracking")))
         self._expr.setChecked(bool(d.get("expression_monitor")))
         self._safety.setChecked(bool(d.get("safety_watch")))
+        idx = self._rec_mode.findData(d.get("recording_mode") or "off")
+        self._rec_mode.setCurrentIndex(max(0, idx))
 
     def _auto_url(self) -> str:
         return Config.build_rtsp_url(
@@ -191,6 +212,38 @@ class CameraDialog(QDialog):
         self._test_result.setStyleSheet("color:#27ae60;" if ok else "color:#ef4565;")
         self._test_result.setText(("Connected. " if ok else "Failed. ") + msg)
 
+    def _fetch_onvif(self):
+        host = self._host.text().strip()
+        if not host:
+            self._test_result.setText("Enter the camera's IP address first.")
+            return
+        self._btn_onvif.setEnabled(False)
+        self._test_result.setStyleSheet("color:#9098b1;")
+        self._test_result.setText("Asking the camera over ONVIF…")
+
+        def fetch(h, port, user, pwd, sub):
+            handler = ONVIFHandler(h, port, user, pwd)
+            if not handler.connect():
+                raise ConnectionError("ONVIF connection failed (check HTTP port, login, "
+                                      "and that ONVIF is enabled on the camera)")
+            uri = handler.get_stream_uri(1 if sub else 0) or handler.get_stream_uri(0)
+            if not uri:
+                raise ConnectionError("The camera did not return a stream address")
+            return uri
+
+        run_async(fetch, self._on_onvif, host, self._http.value(), self._user.text(),
+                  self._pwd.text(), self._sub.isChecked(), receiver=self)
+
+    def _on_onvif(self, uri, error):
+        self._btn_onvif.setEnabled(True)
+        if error:
+            self._test_result.setStyleSheet("color:#ef4565;")
+            self._test_result.setText(str(error))
+            return
+        self._rtsp.setText(uri)
+        self._test_result.setStyleSheet("color:#27ae60;")
+        self._test_result.setText("Stream address received from the camera.")
+
     def _accept(self):
         if not self._name.text().strip() or not (self._host.text().strip() or
                                                  self._rtsp.text().strip()):
@@ -223,6 +276,7 @@ class CameraDialog(QDialog):
             "attendance_tracking": self._attend.isChecked(),
             "expression_monitor": self._expr.isChecked(),
             "safety_watch": self._safety.isChecked(),
+            "recording_mode": self._rec_mode.currentData(),
         }
 
 
@@ -362,11 +416,13 @@ class CameraManagement(QWidget):
     def _add(self, prefill: dict = None):
         dlg = CameraDialog(data=prefill, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
+            data = dlg.get_data()
             try:
-                self.mgr.add_camera(dlg.get_data())
+                self.mgr.add_camera(data)
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
                 return
+            audit(self.db, "camera_add", f"{data['name']} ({data['brand']} {data['host']})")
             self.refresh()
             self.cameras_changed.emit()
 
@@ -381,6 +437,7 @@ class CameraManagement(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
                 return
+            audit(self.db, "camera_edit", f"{cam['name']} (id {camera_id})")
             self.refresh()
             self.cameras_changed.emit()
 
@@ -390,6 +447,7 @@ class CameraManagement(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             self.mgr.delete_camera(camera_id)
+            audit(self.db, "camera_delete", f"Camera id {camera_id}")
             self.refresh()
             self.cameras_changed.emit()
 
