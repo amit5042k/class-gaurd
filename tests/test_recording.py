@@ -147,3 +147,21 @@ def test_motion_detector_levels():
     det.update(a)
     assert det.update(a) == 0.0
     assert det.update(b) > rec_mod.MOTION_LEVELS["medium"]
+
+
+def test_queued_frames_are_written_when_stopping(db, monkeypatch):
+    """A slow start (e.g. codec loading on Windows) must not lose the tail."""
+    import cv2 as _cv2
+    real = _cv2.VideoWriter
+
+    def slow_writer(*a, **k):
+        time.sleep(1.5)
+        return real(*a, **k)
+
+    monkeypatch.setattr(rec_mod.cv2, "VideoWriter", slow_writer)
+    mgr = RecordingManager(db)
+    mgr.set_cameras([{"id": 8, "recording_mode": "continuous"}])
+    _feed(mgr, 8, 1.2)          # all frames queue up while the file is opening
+    mgr.stop_all(wait_s=10)
+    rows = _wait_closed(db, 1)
+    assert _duration(rows[0].path) >= 1.0

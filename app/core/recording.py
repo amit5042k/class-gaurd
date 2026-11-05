@@ -82,9 +82,10 @@ class CameraRecorder(threading.Thread):
             self.dropped += 1  # encoder can't keep up; skip rather than lag
 
     def stop(self):
+        """Finish writing every queued frame, then close the file."""
         self._running = False
         try:
-            self._queue.put_nowait(None)
+            self._queue.put(None, timeout=5)
         except queue.Full:
             pass
 
@@ -94,10 +95,14 @@ class CameraRecorder(threading.Thread):
 
     # -------------------------------------------------------------- thread
     def run(self):
-        while self._running:
+        # Runs until the stop sentinel (None) arrives, so frames queued
+        # before stop() are still written.
+        while True:
             try:
                 item = self._queue.get(timeout=1.0)
             except queue.Empty:
+                if not self._running:
+                    break
                 self._idle_check()
                 continue
             if item is None:
