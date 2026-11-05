@@ -194,7 +194,7 @@ def test_rtsp_stream_attendance_and_reconnect(qtbot, db, face_image, rtsp_camera
         sm.start_stream(3, url, on_frame=lambda cid, img: frames.append(img.size()),
                         on_status=lambda cid, ok, msg: statuses.append(ok))
         _wait(qtbot, lambda: frames and events, 30000)
-        assert statuses[0] is True and events[0]["type"] == "check_in"
+        assert True in statuses and events[0]["type"] == "check_in"
 
         server.kill()                                 # camera unplugged
         server.wait()
@@ -249,3 +249,11 @@ def test_rtsp_stream_is_recorded_and_playable(qtbot, db, rtsp_camera, monkeypatc
     qtbot.addWidget(player)
     assert player.open(row.path, row.start_time, autoplay=False)
     assert player._frames >= 15 and player._last_frame.shape[1] == 640
+
+
+def test_rtsp_diagnosis_against_real_server(rtsp_camera):
+    from app.protocols.rtsp_diag import NOT_FOUND, OK, describe
+    url, start_server = rtsp_camera
+    start_server()
+    assert describe(url)[0] == OK
+    assert describe(url.replace("/live", "/nothing"))[0] == NOT_FOUND

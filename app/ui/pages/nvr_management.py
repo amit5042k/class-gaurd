@@ -194,6 +194,7 @@ class NVRManagement(QWidget):
             al.setContentsMargins(4, 2, 4, 2)
             nid = nvr["id"]
             for text, name, fn in (("Import channels", "success_btn", self._import),
+                                   ("Check channels", "secondary_btn", self._check),
                                    ("Edit", "secondary_btn", self._edit),
                                    ("Delete", "danger_btn", self._delete)):
                 b = QPushButton(text)
@@ -218,7 +219,7 @@ class NVRManagement(QWidget):
                 f"Create {dlg.get_data()['total_channels']} cameras for this recorder's "
                 "channels now?", QMessageBox.StandardButton.Yes |
                 QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            self._do_import(nvr.id, dlg.names)
+            self._import(nvr.id)
 
     def _edit(self, nvr_id: int):
         nvr = self.mgr.get_nvr(nvr_id)
@@ -236,19 +237,90 @@ class NVRManagement(QWidget):
         if not nvr:
             return
         self.setCursor(Qt.CursorShape.WaitCursor)
-        # Fetch channel names if the recorder supports it; import even if not.
-        run_async(lambda d: probe_nvr(d)["names"],
-                  lambda names, err: self._do_import(nvr_id, names or {}), nvr, receiver=self)
 
-    def _do_import(self, nvr_id: int, names: dict):
+        def work(d):
+            # Channel names (if the recorder offers them) and which channels
+            # actually have a camera, so empty channels aren't imported.
+            try:
+                names = probe_nvr(d)["names"]
+            except Exception:
+                names = {}
+            return names, self.mgr.probe_nvr_channels(nvr_id)
+
+        run_async(work, lambda res, err: self._do_import(nvr_id, res, err), nvr, receiver=self)
+
+    def _do_import(self, nvr_id: int, result, error):
+        from app.protocols.rtsp_diag import AUTH, OK, UNREACHABLE
         self.unsetCursor()
-        n = self.mgr.import_nvr_channels(nvr_id, names)
+        if error or not result:
+            QMessageBox.warning(self, "Import failed", f"Could not check the recorder: {error}")
+            return
+        names, probe = result
+        live = {ch for ch, (kind, _) in probe.items() if kind == OK}
+        kinds = {kind for kind, _ in probe.values()}
+        only = live
+        if not live:
+            if kinds <= {AUTH} or kinds <= {UNREACHABLE}:
+                QMessageBox.warning(self, "Can't import", next(iter(probe.values()))[1])
+                return
+            if QMessageBox.question(
+                    self, "No camera found",
+                    "The recorder didn't report video on any channel. Import all "
+                    f"{len(probe)} channels anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            only = None
+        n = self.mgr.import_nvr_channels(nvr_id, names, only=only)
         audit(self.db, "nvr_import", f"NVR id {nvr_id}: {n} camera(s) created")
         self.refresh()
         self.cameras_changed.emit()
-        QMessageBox.information(self, "Channels imported",
-                                f"Created {n} camera(s)." if n else
-                                "Every channel already has a camera.")
+        skipped = len(probe) - len(live) if only is not None else 0
+        msg = f"Created {n} camera(s)." if n else "Every channel with a camera is already added."
+        if skipped:
+            msg += f"\n\n{skipped} channel(s) have no camera connected and were skipped."
+        QMessageBox.information(self, "Channels imported", msg)
+
+    def _check(self, nvr_id: int):
+        """Test every channel already imported; offer to hide empty ones."""
+        cams = [c for c in self.mgr.get_all_cameras() if c.get("nvr_id") == nvr_id]
+        if not cams:
+            QMessageBox.information(self, "Check channels", "No channels imported yet.")
+            return
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        run_async(lambda: self.mgr.probe_nvr_channels(nvr_id, [c["channel"] for c in cams]),
+                  lambda res, err: self._check_done(cams, res, err), receiver=self)
+
+    def _check_done(self, cams, probe, error):
+        from app.protocols.rtsp_diag import NOT_FOUND, OK
+        self.unsetCursor()
+        if error or probe is None:
+            QMessageBox.warning(self, "Check failed", str(error))
+            return
+        groups = {}
+        for ch, (kind, msg) in sorted(probe.items()):
+            groups.setdefault((kind, msg), []).append(ch)
+        lines = []
+        for (kind, msg), chs in groups.items():
+            label = "Working" if kind == OK else msg
+            lines.append(f"Channel(s) {', '.join(map(str, chs))}:\n   {label}")
+        empty = [c for c in cams if probe.get(c["channel"], ("",))[0] == NOT_FOUND
+                 and c["is_active"]]
+        text = "\n\n".join(lines)
+        if not empty:
+            QMessageBox.information(self, "Channel check", text)
+            return
+        if QMessageBox.question(
+                self, "Channel check",
+                f"{text}\n\nHide the {len(empty)} channel(s) with no camera from Live View? "
+                "(They stay in Camera Management, disabled, and can be re-enabled.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
+            for c in empty:
+                self.mgr.update_camera(c["id"], {"is_active": False})
+            audit(self.db, "nvr_check", f"Disabled {len(empty)} empty channel(s)")
+            self.refresh()
+            self.cameras_changed.emit()
 
     def _delete(self, nvr_id: int):
         nvr = next((n for n in self.mgr.get_all_nvrs() if n["id"] == nvr_id), None)

@@ -59,6 +59,7 @@ class VideoCell(QWidget):
         self._canvas.setSizePolicy(QSizePolicy.Policy.Ignored,
                                    QSizePolicy.Policy.Ignored)
         self._canvas.setMinimumSize(1, 1)
+        self._canvas.setWordWrap(True)
         self._canvas.setText("No Signal")
         self._canvas.setStyleSheet("color:#444; font-size:13px;")
         root.addWidget(self._canvas)
@@ -84,9 +85,11 @@ class VideoCell(QWidget):
             self._canvas.setStyleSheet("")
         else:
             self._status_dot.setObjectName("disconnected_dot")
-            self._status_dot.setStyleSheet("color:#ef4565; font-size:14px;")
             self._canvas.setPixmap(QPixmap())  # clears text too, so do it first
-            self._canvas.setText(f"Disconnected\n{msg}")
+            connecting = msg.startswith("Connecting")
+            self._canvas.setText(msg if connecting else f"Disconnected\n{msg}")
+            self._status_dot.setStyleSheet(
+                f"color:{'#f39c12' if connecting else '#ef4565'}; font-size:14px;")
             self._canvas.setStyleSheet("color:#555; font-size:12px;")
 
     def set_recording(self, recording: bool, manual: bool = False):

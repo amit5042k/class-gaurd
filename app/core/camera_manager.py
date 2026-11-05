@@ -9,6 +9,11 @@ from app.core.security import decrypt_secret, encrypt_secret, is_encrypted
 logger = logging.getLogger(__name__)
 
 
+def _natural_key(text: str):
+    import re
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", text or "")]
+
+
 class CameraManager:
     def __init__(self, db):
         self.db = db
@@ -88,7 +93,9 @@ class CameraManager:
             q = session.query(Camera)
             if active_only:
                 q = q.filter(Camera.is_active.is_(True))
-            cams = q.order_by(Camera.group_name, Camera.name).all()
+            cams = q.all()
+            # Natural order: "Channel 2" before "Channel 10".
+            cams.sort(key=lambda c: (c.group_name or "Default", _natural_key(c.name)))
             return [self._cam_dict(c) for c in cams]
         finally:
             session.close()
@@ -232,9 +239,28 @@ class CameraManager:
         finally:
             session.close()
 
+    def channel_url(self, nvr: Dict, channel: int, rtsp_port: int = 554) -> str:
+        return self.auto_url({"brand": nvr["brand"], "host": nvr["host"], "port": rtsp_port,
+                              "username": nvr["username"], "password": nvr["password"],
+                              "channel": channel,
+                              "use_substream": int(nvr["total_channels"]) > 4})
+
+    def probe_nvr_channels(self, nvr_id: int, channels=None, workers: int = 4) -> Dict[int, tuple]:
+        """Ask the NVR which channels have video. Returns {channel: (kind, message)}."""
+        from concurrent.futures import ThreadPoolExecutor
+        from app.protocols.rtsp_diag import describe
+        nvr = self.get_nvr(nvr_id)
+        if not nvr:
+            return {}
+        channels = list(channels or range(1, int(nvr["total_channels"]) + 1))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = pool.map(lambda ch: describe(self.channel_url(nvr, ch)), channels)
+            return dict(zip(channels, results))
+
     def import_nvr_channels(self, nvr_id: int, names: Dict[int, str] = None,
-                            rtsp_port: int = 554) -> int:
-        """Create a camera for each NVR channel that doesn't have one yet."""
+                            rtsp_port: int = 554, only=None) -> int:
+        """Create a camera for each NVR channel that doesn't have one yet
+        (only the channels in `only`, when given)."""
         nvr = self.get_nvr(nvr_id)
         if not nvr:
             return 0
@@ -246,7 +272,7 @@ class CameraManager:
             session.close()
         created = 0
         for ch in range(1, int(nvr["total_channels"]) + 1):
-            if ch in have:
+            if ch in have or (only is not None and ch not in only):
                 continue
             title = (names.get(ch) or "").strip() or f"Channel {ch}"
             self.add_camera({

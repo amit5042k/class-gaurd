@@ -17,6 +17,7 @@ OPEN_TIMEOUT_MS = 10_000
 READ_TIMEOUT_MS = 10_000
 DISPLAY_MAX_WIDTH = 1280
 DISPLAY_FPS = 15  # screen refresh cap; recording and AI still get every frame
+CONNECTING = "Connecting…"
 
 
 def open_capture(source: str) -> cv2.VideoCapture:
@@ -58,13 +59,23 @@ class StreamThread(QThread):
         self._running = True
         delay = self._base_delay
         last_display = 0.0
+        failures = 0
+        reason = ""
+        self.status_changed.emit(self.camera_id, False, CONNECTING)
         while self._running:
             cap = None
             try:
                 cap = open_capture(self.rtsp_url)
                 if not cap.isOpened():
-                    self.status_changed.emit(self.camera_id, False, "Cannot open stream")
+                    # Ask the device why (on the first failure and every 5th after),
+                    # so the tile says "wrong password" or "no camera on this channel".
+                    if failures % 5 == 0:
+                        reason = self._diagnose() or reason
+                    failures += 1
+                    self.status_changed.emit(self.camera_id, False,
+                                             reason or "Cannot open stream")
                 else:
+                    failures, reason = 0, ""
                     self.status_changed.emit(self.camera_id, True, "Connected")
                     delay = self._base_delay
                     while self._running:
@@ -94,6 +105,16 @@ class StreamThread(QThread):
             if self._running:
                 self._sleep(delay)
                 delay = min(delay * 2, 30)
+
+    def _diagnose(self) -> str:
+        if "://" not in str(self.rtsp_url) or not str(self.rtsp_url).startswith("rtsp"):
+            return ""
+        try:
+            from app.protocols.rtsp_diag import explain_failure
+            return explain_failure(self.rtsp_url) or ""
+        except Exception:
+            logger.exception("RTSP diagnosis failed")
+            return ""
 
     def _sleep(self, seconds: float):
         end = time.monotonic() + seconds
