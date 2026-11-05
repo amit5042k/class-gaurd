@@ -203,7 +203,7 @@ def test_rtsp_stream_attendance_and_reconnect(qtbot, db, face_image, rtsp_camera
         start_server()                                # camera back
         _wait(qtbot, lambda: statuses[-1] is True and len(frames) > n + 5, 40000)
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)
         worker.stop()
 
 
@@ -219,7 +219,7 @@ def test_unreachable_camera_reports_failure_quickly(qtbot):
         _wait(qtbot, lambda: statuses, 15000)
         assert statuses[0][0] is False and time.monotonic() - t0 < 15
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)
 
 
 def test_rtsp_stream_is_recorded_and_playable(qtbot, db, rtsp_camera, monkeypatch, tmp_path):
@@ -239,7 +239,7 @@ def test_rtsp_stream_is_recorded_and_playable(qtbot, db, rtsp_camera, monkeypatc
         _wait(qtbot, lambda: rec.is_recording(5), 20000)
         qtbot.wait(3000)
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)
         rec.stop_all()
     s = db.get_session()
     row = s.query(Recording).filter(Recording.end_time.isnot(None)).one()
@@ -272,7 +272,7 @@ def test_auto_transport_falls_back_to_udp(qtbot, rtsp_camera):
         assert learned == ["udp"] and ("Connected (UDP)" in [m for ok, m in statuses if ok])
         assert sm.learned_transport[1] == "udp"
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)
 
 
 def test_tcp_only_setting_does_not_fall_back(qtbot, rtsp_camera):
@@ -287,7 +287,7 @@ def test_tcp_only_setting_does_not_fall_back(qtbot, rtsp_camera):
         _wait(qtbot, lambda: len(statuses) >= 2, 40000)
         assert not any(ok for ok, _ in statuses)
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)
 
 
 def test_diagnosis_report(rtsp_camera):

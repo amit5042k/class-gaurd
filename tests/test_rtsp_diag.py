@@ -127,7 +127,7 @@ def test_stream_tile_shows_the_reason(qtbot, nvr):
         qtbot.waitUntil(lambda: any("no camera" in m for m in statuses), timeout=30000)
         assert statuses[0].startswith("Connecting")
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)
 
 
 def test_natural_camera_order(db):
@@ -152,7 +152,7 @@ def test_live_view_keeps_status_across_layout_change(qtbot):
         lv._layout_cb.setCurrentIndex(3)          # 4x4: tiles are rebuilt
         assert "Can't reach" in lv._grid.get_cell(1)._canvas.text()
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)
 
 
 def test_diagnosis_report_for_empty_channel_hides_password(nvr):
@@ -185,7 +185,7 @@ def test_live_view_streams_only_visible_page(qtbot):
         lv.stop_all_streams()
         assert sm.is_streaming(8)                # pinned camera keeps going
     finally:
-        sm.stop_all(wait_ms=5000)
+        sm.stop_all(wait_ms=30000)               # don't leave reconnect loops running
 
 
 def test_slow_udp_open_does_not_block_other_cameras():
@@ -195,10 +195,14 @@ def test_slow_udp_open_does_not_block_other_cameras():
     from app.core import stream_manager as smod
     real = smod.cv2.VideoCapture
 
+    class Dummy:
+        def release(self):
+            pass
+
     def slow(source, *a, **k):
         if "slow" in str(source):
             time.sleep(3)          # like a 10 s timeout on an unreachable camera
-        return real("/nonexistent")
+        return Dummy()
 
     smod.cv2.VideoCapture = slow
     try:
