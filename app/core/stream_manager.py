@@ -70,20 +70,44 @@ class _TransportLock:
 _transport_lock = _TransportLock()
 
 
+_ENV_READ_WINDOW_S = 0.3  # OpenCV reads the options as the open starts
+
+
+def _open_guarded(source: str, params, options: str) -> cv2.VideoCapture:
+    """Open with the given FFmpeg options without blocking other cameras.
+
+    The options are process-wide, but OpenCV only reads them at the start of
+    an open, so the lock is held just for that moment, not for the whole
+    (possibly 10 s) connection attempt.
+    """
+    result = {}
+
+    def target():
+        result["cap"] = cv2.VideoCapture(source, cv2.CAP_FFMPEG, params)
+
+    worker = threading.Thread(target=target, daemon=True)
+    special = options != _DEFAULT_OPTIONS
+    ctx = _transport_lock.exclusive() if special else _transport_lock.shared()
+    with ctx:
+        if special:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = options
+        try:
+            worker.start()
+            worker.join(_ENV_READ_WINDOW_S)
+        finally:
+            if special:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _DEFAULT_OPTIONS
+    worker.join()
+    return result["cap"]
+
+
 def open_capture(source: str, transport: str = "tcp") -> cv2.VideoCapture:
     if not (isinstance(source, str) and "://" in source):
         return cv2.VideoCapture(source)
     params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
               cv2.CAP_PROP_READ_TIMEOUT_MSEC, READ_TIMEOUT_MS]
-    if transport == "udp" and source.startswith("rtsp"):
-        with _transport_lock.exclusive():
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
-            try:
-                return cv2.VideoCapture(source, cv2.CAP_FFMPEG, params)
-            finally:
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _DEFAULT_OPTIONS
-    with _transport_lock.shared():
-        return cv2.VideoCapture(source, cv2.CAP_FFMPEG, params)
+    udp = transport == "udp" and source.startswith("rtsp")
+    return _open_guarded(source, params, "rtsp_transport;udp" if udp else _DEFAULT_OPTIONS)
 
 
 def to_qimage(frame: np.ndarray, max_width: int = 0) -> QImage:

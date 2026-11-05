@@ -186,3 +186,28 @@ def test_live_view_streams_only_visible_page(qtbot):
         assert sm.is_streaming(8)                # pinned camera keeps going
     finally:
         sm.stop_all(wait_ms=5000)
+
+
+def test_slow_udp_open_does_not_block_other_cameras():
+    """A UDP attempt to a dead device must not hold up TCP opens of others."""
+    import threading
+    import time
+    from app.core import stream_manager as smod
+    real = smod.cv2.VideoCapture
+
+    def slow(source, *a, **k):
+        if "slow" in str(source):
+            time.sleep(3)          # like a 10 s timeout on an unreachable camera
+        return real("/nonexistent")
+
+    smod.cv2.VideoCapture = slow
+    try:
+        t = threading.Thread(target=smod.open_capture, args=("rtsp://h/slow", "udp"))
+        t.start()
+        time.sleep(0.1)
+        t0 = time.monotonic()
+        smod.open_capture("rtsp://h/fast", "tcp").release()
+        assert time.monotonic() - t0 < 1.0
+        t.join()
+    finally:
+        smod.cv2.VideoCapture = real
