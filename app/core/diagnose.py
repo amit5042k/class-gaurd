@@ -36,11 +36,35 @@ def capture_native_errors():
         _native_handle = open(path, "a", buffering=1, encoding="utf-8", errors="replace")
         os.dup2(_native_handle.fileno(), 2)
         if sys.platform == "win32":
-            import ctypes
-            import msvcrt
-            ctypes.windll.kernel32.SetStdHandle(-12, msvcrt.get_osfhandle(2))
+            _redirect_windows_crts()
     except Exception:
         _native_handle = None
+
+
+def _redirect_windows_crts():
+    """OpenCV's FFmpeg DLL writes through the old msvcrt C runtime, whose stderr
+    was fixed at start-up, so redirect that runtime's descriptor 2 as well."""
+    import ctypes
+    import msvcrt
+    handle = msvcrt.get_osfhandle(2)
+    ctypes.windll.kernel32.SetStdHandle(-12, handle)
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.DuplicateHandle.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint32,
+                                        ctypes.c_int, ctypes.c_uint32]
+        old_crt = ctypes.cdll.msvcrt
+        old_crt._open_osfhandle.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        old_crt._dup2.argtypes = [ctypes.c_int, ctypes.c_int]
+        proc = k32.GetCurrentProcess()
+        new = ctypes.c_void_p()
+        if k32.DuplicateHandle(proc, handle, proc, ctypes.byref(new), 0, False, 2):
+            fd = old_crt._open_osfhandle(new.value, 0x0008)  # _O_APPEND
+            if fd >= 0:
+                old_crt._dup2(fd, 2)  # msvcrt's stderr is unbuffered: writes go straight to fd 2
+    except Exception:
+        pass
 
 
 def _native_offset() -> int:
