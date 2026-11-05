@@ -150,7 +150,7 @@ def auto_backup_if_due(keep: int = 7, every: timedelta = timedelta(days=1)) -> O
     existing = sorted(glob.glob(os.path.join(folder, "auto_*.zip")))
     if existing:
         last = datetime.fromtimestamp(os.path.getmtime(existing[-1]))
-        if datetime.now() - last < every:
+        if every > timedelta(0) and datetime.now() - last < every:
             return None
     if not os.path.exists(Config.DB_PATH):
         return None
