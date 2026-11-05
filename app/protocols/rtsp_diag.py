@@ -36,7 +36,7 @@ def _split(url: str):
     return u.hostname, u.port or 554, user, pwd, clean
 
 
-def _request(sock, url: str, cseq: int, auth: str = "") -> Tuple[int, dict]:
+def _request(sock, url: str, cseq: int, auth: str = "", want_body: bool = False):
     lines = [f"DESCRIBE {url} RTSP/1.0", f"CSeq: {cseq}", "Accept: application/sdp",
              "User-Agent: ClassGuard"]
     if auth:
@@ -48,7 +48,8 @@ def _request(sock, url: str, cseq: int, auth: str = "") -> Tuple[int, dict]:
         if not chunk:
             break
         data += chunk
-    head = data.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+    head, _, body = data.partition(b"\r\n\r\n")
+    head = head.decode("latin-1")
     first, *rest = head.split("\r\n")
     m = re.match(r"RTSP/\d\.\d\s+(\d{3})", first)
     if not m:
@@ -58,6 +59,13 @@ def _request(sock, url: str, cseq: int, auth: str = "") -> Tuple[int, dict]:
         if ":" in line:
             k, v = line.split(":", 1)
             headers.setdefault(k.strip().lower(), []).append(v.strip())
+    length = int((headers.get("content-length") or ["0"])[0] or 0)
+    while len(body) < length:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+    headers["_body"] = body[:length].decode("latin-1", "replace")
     return int(m.group(1)), headers
 
 
@@ -77,16 +85,38 @@ def _digest(challenge: str, user: str, pwd: str, url: str) -> str:
 
 def describe(url: str, timeout: float = 4.0) -> Tuple[str, str]:
     """Returns (kind, message). kind is one of OK, UNREACHABLE, AUTH, NOT_FOUND, BUSY, OTHER."""
+    d = describe_detail(url, timeout)
+    return d["kind"], d["message"]
+
+
+def parse_sdp(sdp: str) -> list:
+    """Media in an SDP, e.g. ['video H265/90000', 'audio PCMA/8000']."""
+    out, media = [], None
+    for line in sdp.splitlines():
+        if line.startswith("m="):
+            media = line[2:].split(" ")[0]
+        elif line.startswith("a=rtpmap:") and media:
+            out.append(f"{media} {line.split(' ', 1)[1].strip()}")
+    return out
+
+
+def describe_detail(url: str, timeout: float = 4.0) -> dict:
+    """Like describe(), plus the RTSP status code and the media the device offers."""
+    result = {"kind": OTHER, "message": "", "code": None, "media": [], "auth": "none"}
+
+    def done(kind, message, code=None):
+        result.update(kind=kind, message=message, code=code)
+        return result
     try:
         host, port, user, pwd, clean = _split(url)
     except Exception:
-        return OTHER, "The stream address is not valid."
+        return done(OTHER, "The stream address is not valid.")
     if not host:
-        return OTHER, "The stream address has no IP address."
+        return done(OTHER, "The stream address has no IP address.")
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
     except OSError:
-        return UNREACHABLE, MESSAGES[UNREACHABLE].format(host=host, port=port)
+        return done(UNREACHABLE, MESSAGES[UNREACHABLE].format(host=host, port=port))
     try:
         sock.settimeout(timeout)
         code, headers = _request(sock, clean, 1)
@@ -95,14 +125,18 @@ def describe(url: str, timeout: float = 4.0) -> Tuple[str, str]:
             digest = next((c for c in challenges if c.lower().startswith("digest")), None)
             if digest:
                 auth = _digest(digest[6:].strip(), user, pwd, clean)
+                result["auth"] = "digest"
             else:
                 auth = "Basic " + base64.b64encode(f"{user}:{pwd}".encode()).decode()
+                result["auth"] = "basic"
             code, headers = _request(sock, clean, 2, auth)
-        return classify(code)
+        result["media"] = parse_sdp(headers.get("_body", ""))
+        kind, msg = classify(code)
+        return done(kind, msg, code)
     except socket.timeout:
-        return OTHER, f"{host}:{port} accepted the connection but didn't answer."
+        return done(OTHER, f"{host}:{port} accepted the connection but didn't answer.")
     except Exception as e:
-        return OTHER, f"Unexpected reply from {host}:{port}: {e}"
+        return done(OTHER, f"Unexpected reply from {host}:{port}: {e}")
     finally:
         sock.close()
 

@@ -4,7 +4,10 @@ from typing import Dict, List, Optional
 
 import cv2
 from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QVBoxLayout, QWidget
+)
 
 from app.config import Config
 from app.core.stream_manager import StreamManager
@@ -87,6 +90,7 @@ class LiveView(QWidget):
         self._grid.cell_clicked.connect(self._select)
         self._grid.record_toggled.connect(self.record_requested)
         self._grid.fullscreen_requested.connect(lambda _cid: self.fullscreen_requested.emit())
+        self._grid.diagnose_requested.connect(self.diagnose)
         body.addWidget(self._grid, 1)
         self.ptz = PTZPanel()
         self.ptz.record_toggled.connect(self.record_requested)
@@ -198,7 +202,8 @@ class LiveView(QWidget):
         if not cam or not cam.get("rtsp_url"):
             return False
         self.sm.start_stream(cam["id"], cam["rtsp_url"],
-                             on_frame=self._grid.update_frame, on_status=self._on_status)
+                             on_frame=self._grid.update_frame, on_status=self._on_status,
+                             transport=cam.get("rtsp_transport") or "auto")
         self._emit_count()
         return True
 
@@ -253,6 +258,12 @@ class LiveView(QWidget):
     def connected_ids(self):
         return set(self._connected)
 
+    # --------------------------------------------------------------- diagnose
+    def diagnose(self, camera_id: int):
+        cam = next((c for c in self._cameras if c["id"] == camera_id), None)
+        if cam:
+            DiagnoseDialog(cam, self).exec()
+
     # ---------------------------------------------------------------- snapshot
     def _take_snapshot(self, camera_id: int):
         cam = next((c for c in self._cameras if c["id"] == camera_id), None)
@@ -275,3 +286,40 @@ class LiveView(QWidget):
         run_async(grab, lambda path, err: self.message.emit(
             f"Snapshot saved: {path}" if path else "Snapshot failed"),
             cam["rtsp_url"], receiver=self)
+
+
+class DiagnoseDialog(QDialog):
+    """Runs the connection test in the background and shows a copyable report."""
+
+    def __init__(self, cam: Dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Diagnose: {cam['name']}")
+        self.resize(760, 520)
+        lay = QVBoxLayout(self)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setStyleSheet("font-family: Consolas, 'DejaVu Sans Mono', monospace;")
+        self.text.setPlainText("Testing the connection (network, login, then video over TCP "
+                               "and UDP). This takes up to 30 seconds…")
+        lay.addWidget(self.text)
+        row = QHBoxLayout()
+        self.copy_btn = QPushButton("Copy report")
+        self.copy_btn.setObjectName("primary_btn")
+        self.copy_btn.setEnabled(False)
+        self.copy_btn.clicked.connect(self._copy)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addStretch()
+        row.addWidget(self.copy_btn)
+        row.addWidget(close)
+        lay.addLayout(row)
+        from app.core.diagnose import run_diagnosis
+        run_async(run_diagnosis, self._done, cam, receiver=self)
+
+    def _done(self, report, error):
+        self.text.setPlainText(report if report else f"Diagnosis failed: {error}")
+        self.copy_btn.setEnabled(bool(report))
+
+    def _copy(self):
+        QApplication.clipboard().setText(self.text.toPlainText())
+        self.copy_btn.setText("Copied")

@@ -15,6 +15,7 @@ class CameraGrid(QWidget):
     snapshot_requested = pyqtSignal(int)
     record_toggled = pyqtSignal(int, bool)
     fullscreen_requested = pyqtSignal(int)
+    diagnose_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -55,6 +56,7 @@ class CameraGrid(QWidget):
             cell.snapshot_requested.connect(self.snapshot_requested)
             cell.record_toggled.connect(self.record_toggled)
             cell.fullscreen_requested.connect(self.fullscreen_requested)
+            cell.diagnose_requested.connect(self.diagnose_requested)
             cell.set_selected(cam["id"] == self._selected)
             self._cells[cam["id"]] = cell
             r, c = divmod(i, cols)

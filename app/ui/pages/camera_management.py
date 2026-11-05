@@ -84,6 +84,11 @@ class CameraDialog(QDialog):
         form.addRow(lbl("Password:"), self._pwd)
         form.addRow(lbl("Channel:"), self._ch)
         form.addRow(lbl(""), self._sub)
+        self._transport = QComboBox()
+        for label, val in (("Auto (TCP, falls back to UDP)", "auto"), ("TCP", "tcp"),
+                           ("UDP", "udp")):
+            self._transport.addItem(label, val)
+        form.addRow(lbl("RTSP transport:"), self._transport)
         form.addRow(lbl("Location:"), self._loc)
         form.addRow(lbl("Group:"), self._group)
         rtsp_row = QHBoxLayout()
@@ -160,6 +165,8 @@ class CameraDialog(QDialog):
         self._pwd.setText(d.get("password", ""))
         self._ch.setValue(d.get("channel") or 1)
         self._sub.setChecked(bool(d.get("use_substream")))
+        self._transport.setCurrentIndex(max(0, self._transport.findData(
+            d.get("rtsp_transport") or "auto")))
         self._active.setChecked(d.get("is_active", True) is not False)
         self._loc.setText(d.get("location", ""))
         self._group.setText(d.get("group_name", "Default"))
@@ -268,6 +275,7 @@ class CameraDialog(QDialog):
             "password": self._pwd.text(),
             "channel": self._ch.value(),
             "use_substream": self._sub.isChecked(),
+            "rtsp_transport": self._transport.currentData(),
             "is_active": self._active.isChecked(),
             "location": self._loc.text(),
             "group_name": self._group.text() or "Default",

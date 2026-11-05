@@ -67,6 +67,23 @@ def run(app) -> int:
         return f"wrote {files[0]}"
     check("Recording", recording)
 
+    def native_log():
+        import os
+        import socket
+        from app.core.diagnose import capture_native_errors, native_log_path
+        from app.core.stream_manager import open_capture
+        capture_native_errors()
+        if not os.path.exists(native_log_path()):
+            return "not redirected (running with a console)"
+        before = os.path.getsize(native_log_path())
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        open_capture(f"rtsp://127.0.0.1:{port}/selftest").release()
+        grew = os.path.getsize(native_log_path()) > before
+        return "video errors are captured" if grew else "no video error text captured"
+    check("Video error log", native_log)
+
     db.close()
     shutil.rmtree(tmp, ignore_errors=True)
     ok = all(r[0] for r in results)

@@ -124,6 +124,7 @@ class CameraManager:
             "username": cam.username, "password": decrypt_secret(cam.password),
             "channel": cam.channel, "custom_rtsp_url": decrypt_secret(cam.rtsp_url),
             "use_substream": bool(cam.use_substream),
+            "rtsp_transport": cam.rtsp_transport or "auto",
             "onvif_enabled": cam.onvif_enabled, "is_active": cam.is_active,
             "location": cam.location or "", "group_name": cam.group_name or "Default",
             "nvr_id": cam.nvr_id,

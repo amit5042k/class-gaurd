@@ -23,6 +23,7 @@ class Camera(Base):
     channel         = Column(Integer, default=1)
     rtsp_url        = Column(String(600))
     use_substream   = Column(Boolean, default=False)
+    rtsp_transport  = Column(String(10), default="auto")  # auto | tcp | udp
     onvif_enabled   = Column(Boolean, default=False)
     is_active       = Column(Boolean, default=True)
     location        = Column(String(200))

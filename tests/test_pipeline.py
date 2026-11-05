@@ -159,8 +159,8 @@ def rtsp_camera(tmp_path, face_image):
     script = os.path.join(os.path.dirname(__file__), "rtsp_test_server.py")
     procs = []
 
-    def start():
-        p = subprocess.Popen([exe, script, str(port), str(img)],
+    def start(*extra):
+        p = subprocess.Popen([exe, script, str(port), str(img), *extra],
                              stdout=subprocess.PIPE, text=True)
         procs.append(p)
         assert p.stdout.readline().strip() == "READY"
@@ -257,3 +257,45 @@ def test_rtsp_diagnosis_against_real_server(rtsp_camera):
     start_server()
     assert describe(url)[0] == OK
     assert describe(url.replace("/live", "/nothing"))[0] == NOT_FOUND
+
+
+def test_auto_transport_falls_back_to_udp(qtbot, rtsp_camera):
+    from app.core.stream_manager import StreamManager
+    url, start_server = rtsp_camera
+    start_server("h264", "10", "udp-only")
+    sm = StreamManager()
+    statuses, learned = [], []
+    sm.start_stream(1, url, on_status=lambda cid, ok, msg: statuses.append((ok, msg)),
+                    on_transport=lambda cid, t: learned.append(t))
+    try:
+        _wait(qtbot, lambda: any(ok for ok, _ in statuses), 60000)
+        assert learned == ["udp"] and ("Connected (UDP)" in [m for ok, m in statuses if ok])
+        assert sm.learned_transport[1] == "udp"
+    finally:
+        sm.stop_all(wait_ms=5000)
+
+
+def test_tcp_only_setting_does_not_fall_back(qtbot, rtsp_camera):
+    from app.core.stream_manager import StreamManager
+    url, start_server = rtsp_camera
+    start_server("h264", "10", "udp-only")
+    sm = StreamManager()
+    statuses = []
+    sm.start_stream(1, url, transport="tcp",
+                    on_status=lambda cid, ok, msg: statuses.append((ok, msg)))
+    try:
+        _wait(qtbot, lambda: len(statuses) >= 2, 40000)
+        assert not any(ok for ok, _ in statuses)
+    finally:
+        sm.stop_all(wait_ms=5000)
+
+
+def test_diagnosis_report(rtsp_camera):
+    from app.core.diagnose import run_diagnosis
+    url, start_server = rtsp_camera
+    start_server("h265", "30")
+    report = run_diagnosis({"name": "Cam", "brand": "Generic RTSP", "channel": 1,
+                            "rtsp_url": url, "password": ""}, stream_seconds=3)
+    assert "reachable" in report and "video H265/90000" in report
+    assert "Video over TCP:" in report and "frames," in report
+    assert "Result: Video works over TCP" in report

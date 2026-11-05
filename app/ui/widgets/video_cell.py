@@ -9,6 +9,7 @@ class VideoCell(QWidget):
     snapshot_requested = pyqtSignal(int)
     fullscreen_requested = pyqtSignal(int)
     record_toggled = pyqtSignal(int, bool)   # camera_id, start?
+    diagnose_requested = pyqtSignal(int)
 
     def __init__(self, camera_id: int, camera_name: str, parent=None):
         super().__init__(parent)
@@ -127,6 +128,8 @@ class VideoCell(QWidget):
         else:
             menu.addAction("Start recording").triggered.connect(
                 lambda: self.record_toggled.emit(self.camera_id, True))
+        menu.addAction("Diagnose connection…").triggered.connect(
+            lambda: self.diagnose_requested.emit(self.camera_id))
         menu.addAction("Single view / back to grid  (double-click)").triggered.connect(
             lambda: self.double_clicked.emit(self.camera_id))
         menu.addAction("Full screen  (F11)").triggered.connect(

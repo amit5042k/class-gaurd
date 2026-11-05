@@ -153,3 +153,11 @@ def test_live_view_keeps_status_across_layout_change(qtbot):
         assert "Can't reach" in lv._grid.get_cell(1)._canvas.text()
     finally:
         sm.stop_all(wait_ms=5000)
+
+
+def test_diagnosis_report_for_empty_channel_hides_password(nvr):
+    from app.core.diagnose import run_diagnosis
+    report = run_diagnosis({"name": "NVR1 - Channel 3", "brand": "Dahua", "channel": 3,
+                            "rtsp_url": nvr.url(3), "password": "Secret@12"})
+    assert "no camera is connected" in report and "login digest" in report
+    assert "Secret" not in report and "****" in report

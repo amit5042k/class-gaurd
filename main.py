@@ -44,6 +44,8 @@ def main():
               Config.SNAPSHOTS_DIR, Config.LOGS_DIR]:
         os.makedirs(d, exist_ok=True)
     setup_logging()
+    from app.core.diagnose import capture_native_errors
+    capture_native_errors()
     from app.core.backup import apply_pending_restore, start_auto_backup_thread
     restored_from = apply_pending_restore()
     Config.load_settings()
