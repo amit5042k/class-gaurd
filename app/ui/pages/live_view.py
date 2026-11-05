@@ -33,6 +33,8 @@ class LiveView(QWidget):
         self._connected = set()
         self._status: Dict[int, tuple] = {}   # camera_id -> (ok, message), survives re-render
         self._start_queue: List[int] = []
+        self._live = False             # Start All pressed: stream what's on screen
+        self._pinned: set = set()      # needed elsewhere (recording, AI, monitoring)
         self._recording: Dict[int, bool] = {}
         self._page = 0
         self._single: Optional[int] = None
@@ -163,10 +165,35 @@ class LiveView(QWidget):
             if cid in self._status and self.sm.is_streaming(cid):
                 self._grid.update_status(cid, *self._status[cid])
             elif not self.sm.is_streaming(cid):
-                self._grid.update_status(cid, False, "Not started. Press Start All.")
+                self._grid.update_status(cid, False, "Waiting to connect…" if self._live
+                                         else "Not started. Press Start All.")
             self._grid.set_recording(cid, self._recording.get(cid, False),
                                      bool(self.recorder and self.recorder.is_manual(cid)))
         self._grid.select(self._selected)
+        self._sync_streams()
+
+    def _sync_streams(self):
+        """Like iVMS: only cameras on screen stream, so a 32-channel NVR isn't
+        asked for 32 streams at once. Pinned cameras (recording / AI) keep going."""
+        if not self._live:
+            return
+        visible = set(self._grid.visible_ids())
+        for cam in self._cameras:
+            cid = cam["id"]
+            if cid not in visible and cid not in self._pinned and self.sm.is_streaming(cid):
+                self.sm.stop_stream(cid)
+                self._connected.discard(cid)
+                self._status.pop(cid, None)
+        self._start_queue = [cid for cid in self._start_queue
+                             if cid in visible or cid in self._pinned]
+        for cid in self._grid.visible_ids():
+            if not self.sm.is_streaming(cid) and cid not in self._start_queue:
+                self._start_queue.append(cid)
+        self._start_next()
+        self._emit_count()
+
+    def set_pinned(self, ids):
+        self._pinned = set(ids)
 
     def _on_layout_change(self, _idx):
         r, c = self._layout_cb.currentData()
@@ -197,10 +224,12 @@ class LiveView(QWidget):
         self._grid.select(camera_id)
 
     # ---------------------------------------------------------------- streams
-    def start_camera(self, camera_id: int) -> bool:
+    def start_camera(self, camera_id: int, pin: bool = False) -> bool:
         cam = next((c for c in self._cameras if c["id"] == camera_id), None)
         if not cam or not cam.get("rtsp_url"):
             return False
+        if pin:
+            self._pinned.add(camera_id)
         self.sm.start_stream(cam["id"], cam["rtsp_url"],
                              on_frame=self._grid.update_frame, on_status=self._on_status,
                              transport=cam.get("rtsp_transport") or "auto")
@@ -208,14 +237,10 @@ class LiveView(QWidget):
         return True
 
     def start_all_streams(self):
-        # Open streams a few at a time: many NVRs reject a burst of 16-32
-        # simultaneous RTSP requests.
-        visible = set(self._grid.visible_ids())
-        order = sorted((c["id"] for c in self._cameras if not self.sm.is_streaming(c["id"])),
-                       key=lambda cid: cid not in visible)
-        self._start_queue = [cid for cid in order if cid not in self._start_queue] \
-            + self._start_queue
-        self._start_next()
+        # Stream the cameras on screen, a few at a time: many NVRs reject a
+        # burst of simultaneous RTSP requests or limit how many run at once.
+        self._live = True
+        self._sync_streams()
 
     def _start_next(self):
         if not self._start_queue:
@@ -223,7 +248,7 @@ class LiveView(QWidget):
         cid = self._start_queue.pop(0)
         if not self.sm.is_streaming(cid):
             self.start_camera(cid)
-        QTimer.singleShot(250, self._start_next)
+        QTimer.singleShot(400, self._start_next)
 
     def _on_status(self, cid: int, ok: bool, msg: str):
         self._status[cid] = (ok, msg)
@@ -235,8 +260,12 @@ class LiveView(QWidget):
         self._emit_count()
 
     def stop_all_streams(self):
+        """Stop live viewing. Cameras that record or run AI keep streaming."""
+        self._live = False
         self._start_queue.clear()
         for cam in self._cameras:
+            if cam["id"] in self._pinned:
+                continue
             self._status.pop(cam["id"], None)
             self.sm.stop_stream(cam["id"])
             self._connected.discard(cam["id"])

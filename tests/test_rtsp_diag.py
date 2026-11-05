@@ -161,3 +161,28 @@ def test_diagnosis_report_for_empty_channel_hides_password(nvr):
                             "rtsp_url": nvr.url(3), "password": "Secret@12"})
     assert "no camera is connected" in report and "login digest" in report
     assert "Secret" not in report and "****" in report
+
+
+def test_live_view_streams_only_visible_page(qtbot):
+    from app.core.stream_manager import StreamManager
+    from app.ui.pages.live_view import LiveView
+    sm = StreamManager()
+    lv = LiveView(None, sm)
+    qtbot.addWidget(lv)
+    port = _free_port()
+    cams = [{"id": i, "name": f"Ch {i}", "rtsp_url": f"rtsp://127.0.0.1:{port}/{i}"}
+            for i in range(1, 9)]
+    lv.load_cameras(cams)                       # 2x2: page 1 = cameras 1-4
+    lv.set_pinned({8})                          # e.g. camera 8 records 24x7
+    sm.start_stream(8, cams[7]["rtsp_url"])
+    try:
+        lv.start_all_streams()
+        qtbot.waitUntil(lambda: all(sm.is_streaming(i) for i in (1, 2, 3, 4)), timeout=10000)
+        assert not any(sm.is_streaming(i) for i in (5, 6, 7))
+        lv._go_page(1)                           # page 2 = cameras 5-8
+        qtbot.waitUntil(lambda: all(sm.is_streaming(i) for i in (5, 6, 7)), timeout=10000)
+        assert not any(sm.is_streaming(i) for i in (1, 2, 3, 4))
+        lv.stop_all_streams()
+        assert sm.is_streaming(8)                # pinned camera keeps going
+    finally:
+        sm.stop_all(wait_ms=5000)

@@ -42,6 +42,7 @@ class MainWindow(QMainWindow):
         # Tests and tools may open the window without signing in: act as admin.
         self.user = user or CurrentUser(0, "admin", "admin", "")
         Session.current = self.user
+        self._background, self._manual_rec, self._monitor_by_kind = set(), set(), {}
         self.setWindowTitle(Config.APP_NAME)
         self.setMinimumSize(1280, 780)
         self.resize(1440, 860)
@@ -227,20 +228,30 @@ class MainWindow(QMainWindow):
         """Cameras that record or run AI need their stream even when nobody is
         watching Live View, like an NVR."""
         self._started = True
+        pinned = set()
         for cam in self._cameras:
             needed = (cam.get("recording_mode") or MODE_OFF) != MODE_OFF or any(
                 cam.get(k) for k in ("attendance_tracking", "face_detection",
                                      "expression_monitor", "safety_watch"))
-            if needed and not self.stream_mgr.is_streaming(cam["id"]):
-                self._p_live.start_camera(cam["id"])
+            if needed:
+                pinned.add(cam["id"])
+                if not self.stream_mgr.is_streaming(cam["id"]):
+                    self._p_live.start_camera(cam["id"], pin=True)
+        self._background = pinned
+        self._refresh_pins()
 
     def _on_record_requested(self, camera_id: int, on: bool):
         if not self.user.can_operate:
             return
         self.recorder.set_manual(camera_id, on)
         audit(self.db, "record_start" if on else "record_stop", f"Camera {camera_id}")
+        if on:
+            self._manual_rec.add(camera_id)
+        else:
+            self._manual_rec.discard(camera_id)
+        self._refresh_pins()
         if on and not self.stream_mgr.is_streaming(camera_id):
-            self._p_live.start_camera(camera_id)
+            self._p_live.start_camera(camera_id, pin=True)
         self._p_live.set_recording_state(camera_id, self.recorder.is_recording(camera_id) or on)
         self.statusBar().showMessage("Manual recording started." if on
                                      else "Manual recording stopped.", 5000)
@@ -273,10 +284,16 @@ class MainWindow(QMainWindow):
         self._p_rec.open_recording(camera_id, hit["path"], hit["start"],
                                    max(0.0, hit["offset"] - 5))
 
+    def _refresh_pins(self):
+        self._p_live.set_pinned(self._background | self._manual_rec |
+                                {c for c in self._monitor_by_kind.values() if c is not None})
+
     def _on_monitor_changed(self, kind: str, camera_id):
         self.ai.set_monitor(kind, camera_id)
+        self._monitor_by_kind[kind] = camera_id
+        self._refresh_pins()
         if camera_id is not None and not self.stream_mgr.is_streaming(camera_id):
-            if self._p_live.start_camera(camera_id):
+            if self._p_live.start_camera(camera_id, pin=True):
                 self.statusBar().showMessage("Started the camera stream for monitoring.", 5000)
 
     def _on_stream_count(self, count: int):
