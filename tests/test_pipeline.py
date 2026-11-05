@@ -297,5 +297,55 @@ def test_diagnosis_report(rtsp_camera):
     report = run_diagnosis({"name": "Cam", "brand": "Generic RTSP", "channel": 1,
                             "rtsp_url": url, "password": ""}, stream_seconds=3)
     assert "reachable" in report and "video H265/90000" in report
-    assert "Video over TCP:" in report and "frames," in report
-    assert "Result: Video works over TCP" in report
+    assert "Video over TCP, standard decoder:" in report and "frames," in report
+    assert "Result: Video works." in report
+
+
+def test_pyav_decodes_h265_rtsp(rtsp_camera):
+    from app.core.av_capture import AVAILABLE, AVCapture
+    if not AVAILABLE:
+        pytest.skip("PyAV not installed")
+    url, start_server = rtsp_camera
+    start_server("h265", "20")
+    cap = AVCapture(url, "tcp")
+    try:
+        assert cap.isOpened(), cap.error
+        frames = [cap.read() for _ in range(5)]
+        assert all(ok for ok, _ in frames) and frames[0][1].shape[:2] == (324, 640)
+    finally:
+        cap.release()
+
+
+def test_switches_to_alternative_decoder_when_no_picture(qtbot, rtsp_camera, monkeypatch):
+    """Reproduces the Hikvision H.265 case: OpenCV opens the stream but never
+    produces a picture; ClassGuard must switch to PyAV and show video."""
+    from app.core import stream_manager as smod
+    from app.core.av_capture import AVAILABLE
+    if not AVAILABLE:
+        pytest.skip("PyAV not installed")
+    url, start_server = rtsp_camera
+    start_server("h265", "20")
+
+    class NoPicture:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(smod, "_open_guarded", lambda *a, **k: NoPicture())
+    sm = smod.StreamManager()
+    statuses, frames = [], []
+    sm.start_stream(1, url, on_status=lambda cid, ok, msg: statuses.append((ok, msg)),
+                    on_frame=lambda cid, img: frames.append(img.size()))
+    try:
+        _wait(qtbot, lambda: frames, 40000)
+        ok_msgs = [m for ok, m in statuses if ok]
+        assert ok_msgs and "alt. decoder" in ok_msgs[0]
+        assert any("Trying the alternative decoder" in m for ok, m in statuses if not ok)
+        assert sm.learned_backend[1] == "pyav"
+    finally:
+        sm.stop_all(wait_ms=30000)

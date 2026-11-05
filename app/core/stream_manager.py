@@ -101,7 +101,10 @@ def _open_guarded(source: str, params, options: str) -> cv2.VideoCapture:
     return result["cap"]
 
 
-def open_capture(source: str, transport: str = "tcp") -> cv2.VideoCapture:
+def open_capture(source: str, transport: str = "tcp", backend: str = "opencv"):
+    if backend == "pyav":
+        from app.core.av_capture import AVCapture
+        return AVCapture(source, transport, OPEN_TIMEOUT_MS / 1000, READ_TIMEOUT_MS / 1000)
     if not (isinstance(source, str) and "://" in source):
         return cv2.VideoCapture(source)
     params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
@@ -130,10 +133,11 @@ class StreamThread(QThread):
     frame_ready = pyqtSignal(int, QImage)
     status_changed = pyqtSignal(int, bool, str)
     transport_learned = pyqtSignal(int, str)   # camera_id, "tcp" | "udp"
+    backend_learned = pyqtSignal(int, str)     # camera_id, "opencv" | "pyav"
 
     def __init__(self, camera_id: int, rtsp_url: str,
                  listeners: List[Callable], reconnect_delay: float = 2,
-                 transport: str = "auto", first: str = "tcp"):
+                 transport: str = "auto", first: str = "tcp", backend: str = "opencv"):
         super().__init__()
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
@@ -144,6 +148,19 @@ class StreamThread(QThread):
         self.transport = transport if transport in ("tcp", "udp") else "auto"
         self._current = "udp" if self.transport == "udp" or \
             (self.transport == "auto" and first == "udp") else "tcp"
+        self._backend = backend if backend in ("opencv", "pyav") else "opencv"
+
+    def _next_attempt(self) -> str:
+        """After "connected but no picture": try the other decoder first (some
+        H.265 streams only decode with PyAV), then the other transport."""
+        from app.core.av_capture import AVAILABLE
+        if self._backend == "opencv" and AVAILABLE:
+            self._backend = "pyav"
+            return "the alternative decoder"
+        self._backend = "opencv"
+        if self._switch_transport():
+            return self._current.upper()
+        return ""
 
     def _switch_transport(self) -> bool:
         """Auto mode: try the other RTSP transport after a failed attempt."""
@@ -179,7 +196,7 @@ class StreamThread(QThread):
                 if pre_kind == "ok":
                     # Some devices briefly refuse a session right after another closes.
                     self._sleep(1.0)
-                cap = open_capture(self.rtsp_url, self._current)
+                cap = open_capture(self.rtsp_url, self._current, self._backend)
                 if not cap.isOpened():
                     # Ask the device why (on the first failure and every 5th after),
                     # so the tile says "wrong password" or "no camera on this channel".
@@ -208,11 +225,14 @@ class StreamThread(QThread):
                         if not got_frame:
                             got_frame = True
                             failures, reason, delay = 0, "", self._base_delay
-                            label = "Connected" + (" (UDP)" if self._current == "udp" else "")
+                            label = "Connected" + (" (UDP)" if self._current == "udp" else "") \
+                                + (" (alt. decoder)" if self._backend == "pyav" else "")
                             self.status_changed.emit(self.camera_id, True, label)
-                            if self.transport == "auto" and not learned:
+                            if not learned:
                                 learned = True
-                                self.transport_learned.emit(self.camera_id, self._current)
+                                if self.transport == "auto":
+                                    self.transport_learned.emit(self.camera_id, self._current)
+                                self.backend_learned.emit(self.camera_id, self._backend)
                         self.last_frame = frame
                         for listener in list(self._listeners):
                             try:
@@ -229,14 +249,16 @@ class StreamThread(QThread):
                             self.status_changed.emit(self.camera_id, False, "Stream lost")
                         else:
                             failures += 1
-                            other = "UDP" if self._current == "tcp" else "TCP"
-                            msg = ("Connected, but no picture arrived over "
-                                   f"{self._current.upper()}.")
-                            if self._switch_transport():
-                                msg += f" Trying {other}…"
+                            tried = f"{self._current.upper()}" + \
+                                (" with the alternative decoder" if self._backend == "pyav" else "")
+                            nxt = self._next_attempt()
+                            msg = f"Connected, but no picture arrived over {tried}."
+                            if nxt:
+                                msg += f" Trying {nxt}…"
                             self.status_changed.emit(self.camera_id, False, msg)
                             logger.warning("Camera %s: opened over %s but no frames",
-                                           self.camera_id, self._current)
+                                           self.camera_id, tried)
+                            delay = self._base_delay  # retry the next combination promptly
             except _Retry:
                 pass
             except Exception as e:
@@ -296,6 +318,7 @@ class StreamManager:
         self._retiring: List[StreamThread] = []
         self.frame_listeners: List[Callable] = []
         self.learned_transport: Dict[int, str] = {}
+        self.learned_backend: Dict[int, str] = {}
         self.reconnect_delay = 2
 
     def add_frame_listener(self, cb: Callable):
@@ -308,9 +331,12 @@ class StreamManager:
         self.stop_stream(camera_id)
         thread = StreamThread(camera_id, rtsp_url, self.frame_listeners,
                               self.reconnect_delay, transport,
-                              self.learned_transport.get(camera_id, "tcp"))
+                              self.learned_transport.get(camera_id, "tcp"),
+                              self.learned_backend.get(camera_id, "opencv"))
         thread.transport_learned.connect(
             lambda cid, t: self.learned_transport.__setitem__(cid, t))
+        thread.backend_learned.connect(
+            lambda cid, b: self.learned_backend.__setitem__(cid, b))
         if on_transport:
             thread.transport_learned.connect(on_transport)
         if on_frame:
@@ -328,7 +354,8 @@ class StreamManager:
         # Never block the UI waiting for a read that may take READ_TIMEOUT_MS;
         # keep a reference until the thread exits so Qt doesn't destroy it early.
         thread.request_stop()
-        for sig in (thread.frame_ready, thread.status_changed, thread.transport_learned):
+        for sig in (thread.frame_ready, thread.status_changed, thread.transport_learned,
+                    thread.backend_learned):
             try:
                 sig.disconnect()
             except TypeError:

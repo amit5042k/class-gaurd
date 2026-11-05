@@ -8,7 +8,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 block_cipher = None
 with_emotion = os.environ.get("CLASSGUARD_EMOTION") == "1"
 
-datas = [("app/assets/icon.png", "app/assets"), ("app/assets/icon.ico", "app/assets")]
+datas = [("app/assets/icon.png", "app/assets"), ("app/assets/icon.ico", "app/assets"),
+         ("app/assets/hevc_sample.mp4", "app/assets")]
 hiddenimports = ["app.ui.pages.users", "sqlalchemy.dialects.sqlite"]
 
 datas += collect_data_files("cv2", includes=["data/*.xml"])      # Haar face detector
@@ -20,6 +21,10 @@ for optional in ("face_recognition_models",):
     except Exception:
         pass
 hiddenimports += ["face_recognition", "dlib", "wsdiscovery", "zeep"]
+try:
+    hiddenimports += collect_submodules("av")  # alternative (H.265) decoder
+except Exception:
+    pass
 
 excludes = ["tkinter", "matplotlib", "IPython", "pytest", "skimage", "scipy"]
 if with_emotion:

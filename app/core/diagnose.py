@@ -93,10 +93,11 @@ def mask(text: str, password: str) -> str:
     return text
 
 
-def _try_stream(url: str, transport: str, seconds: float = 6.0) -> Dict:
+def _try_stream(url: str, transport: str, seconds: float = 6.0,
+                backend: str = "opencv") -> Dict:
     from app.core.stream_manager import open_capture
     t0 = time.monotonic()
-    cap = open_capture(url, transport)
+    cap = open_capture(url, transport, backend)
     out = {"opened": cap.isOpened(), "open_s": time.monotonic() - t0, "frames": 0,
            "size": None, "first_frame_s": None, "read_errors": 0}
     try:
@@ -147,12 +148,16 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
             conclusion = d["message"]
 
     if conclusion is None:
+        from app.core.av_capture import AVAILABLE as pyav_ok
+        attempts = [("tcp", "opencv"), ("udp", "opencv")]
+        if pyav_ok:
+            attempts += [("tcp", "pyav"), ("udp", "pyav")]
         results = {}
-        for step, transport in ((3, "tcp"), (4, "udp")):
+        for step, (transport, backend) in enumerate(attempts, start=3):
             time.sleep(1)  # some devices briefly refuse a request right after another
             offset = _native_offset()
-            r = _try_stream(url, transport, stream_seconds)
-            results[transport] = r
+            r = _try_stream(url, transport, stream_seconds, backend)
+            results[(transport, backend)] = r
             if r["frames"]:
                 summary = (f"{r['frames']} frames, {r['size']}, first picture after "
                            f"{r['first_frame_s']:.1f} s")
@@ -160,16 +165,24 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
                 summary = f"opened in {r['open_s']:.1f} s but NO picture ({r['read_errors']} read errors)"
             else:
                 summary = f"could not open (after {r['open_s']:.1f} s)"
-            lines.append(f"{step}. Video over {transport.upper()}: {summary}")
+            decoder = "standard decoder" if backend == "opencv" else "alternative decoder"
+            lines.append(f"{step}. Video over {transport.upper()}, {decoder}: {summary}")
             for msg in _native_since(offset):
                 lines.append(f"     video library: {mask(msg, pwd)}")
-        tcp, udp = results["tcp"]["frames"], results["udp"]["frames"]
-        if tcp:
-            conclusion = "Video works over TCP. If Live View still fails, too many streams " \
-                         "may be open at once: try the sub-stream or fewer cameras per page."
-        elif udp:
-            conclusion = "Video works only over UDP. Set RTSP transport to UDP for this " \
-                         "camera (Camera Management → Edit), or leave it on Auto."
+            if r["frames"]:
+                break  # found a working combination
+        working = [k for k, r in results.items() if r["frames"]]
+        if working:
+            transport, backend = working[0]
+            if (transport, backend) == ("tcp", "opencv"):
+                conclusion = ("Video works. If Live View still fails, too many streams may be "
+                              "open at once: show fewer cameras per page.")
+            elif backend == "pyav":
+                conclusion = (f"Video works with the alternative decoder over {transport.upper()}."
+                              " ClassGuard switches to it automatically (Auto transport).")
+            else:
+                conclusion = ("Video works only over UDP. Leave RTSP transport on Auto, or set "
+                              "it to UDP for this camera.")
         else:
             media = " ".join(lines).upper()
             if "H265" in media or "HEVC" in media:

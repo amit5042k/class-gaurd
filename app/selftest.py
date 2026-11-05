@@ -67,6 +67,27 @@ def run(app) -> int:
         return f"wrote {files[0]}"
     check("Recording", recording)
 
+    def hevc():
+        from app.config import resource_path
+        from app.core.av_capture import AVAILABLE, AVCapture
+        sample = resource_path("app", "assets", "hevc_sample.mp4")
+        cap = cv2.VideoCapture(sample, cv2.CAP_FFMPEG)
+        n_cv = 0
+        while cap.read()[0]:
+            n_cv += 1
+        cap.release()
+        n_av = 0
+        if AVAILABLE:
+            c = AVCapture(sample)
+            while c.read()[0]:
+                n_av += 1
+            c.release()
+        if not (n_cv or n_av):
+            raise RuntimeError("neither decoder could decode H.265")
+        return (f"standard decoder {'OK' if n_cv else 'NO'} ({n_cv}/20 frames), "
+                f"alternative decoder {'OK' if n_av else 'NO'} ({n_av}/20 frames)")
+    check("H.265 decoding", hevc)
+
     def native_log():
         import os
         import socket

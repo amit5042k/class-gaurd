@@ -8,3 +8,4 @@ requests>=2.28
 onvif-zeep>=0.2.12
 WSDiscovery>=2.0
 cryptography>=41
+av>=12  # alternative decoder for H.265 streams

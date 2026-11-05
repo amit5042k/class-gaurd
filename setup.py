@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="classguard",
-    version="2.0.3",
+    version="2.0.4",
     description="ClassGuard — Multi-brand Camera Management Desktop App",
     packages=find_packages(exclude=["tests"]),
     py_modules=["main"],
@@ -16,6 +16,7 @@ setup(
         "WSDiscovery>=2.0",
         "requests>=2.28.0",
         "cryptography>=41",
+        "av>=12",
     ],
     extras_require={
         "ai": [
