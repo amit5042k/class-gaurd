@@ -122,6 +122,10 @@ def to_qimage(frame: np.ndarray, max_width: int = 0) -> QImage:
     return QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
 
 
+class _Retry(Exception):
+    """Skip this attempt and wait before the next one."""
+
+
 class StreamThread(QThread):
     frame_ready = pyqtSignal(int, QImage)
     status_changed = pyqtSignal(int, bool, str)
@@ -161,6 +165,20 @@ class StreamThread(QThread):
             cap = None
             got_frame = False
             try:
+                # Ask the device first: it answers in well under a second, while a
+                # failed OpenCV open always waits the full timeout on Windows.
+                pre_kind, pre_msg = self._precheck()
+                # "Unreachable" is certain; for the others still let OpenCV try
+                # every third attempt, in case a device answers our check oddly.
+                if pre_kind == "unreachable" or (
+                        pre_kind in ("auth", "not_found", "busy") and failures % 3 != 2):
+                    failures += 1
+                    last_kind, reason = pre_kind, pre_msg
+                    self.status_changed.emit(self.camera_id, False, pre_msg)
+                    raise _Retry()
+                if pre_kind == "ok":
+                    # Some devices briefly refuse a session right after another closes.
+                    self._sleep(1.0)
                 cap = open_capture(self.rtsp_url, self._current)
                 if not cap.isOpened():
                     # Ask the device why (on the first failure and every 5th after),
@@ -219,6 +237,8 @@ class StreamThread(QThread):
                             self.status_changed.emit(self.camera_id, False, msg)
                             logger.warning("Camera %s: opened over %s but no frames",
                                            self.camera_id, self._current)
+            except _Retry:
+                pass
             except Exception as e:
                 logger.error("Stream cam %d: %s", self.camera_id, e)
                 self.status_changed.emit(self.camera_id, False, str(e))
@@ -229,6 +249,15 @@ class StreamThread(QThread):
             if self._running:
                 self._sleep(delay)
                 delay = min(delay * 2, 30)
+
+    def _precheck(self):
+        if not str(self.rtsp_url).startswith("rtsp"):
+            return "", ""
+        try:
+            from app.protocols.rtsp_diag import describe
+            return describe(self.rtsp_url, timeout=3)
+        except Exception:
+            return "", ""
 
     def _diagnose(self):
         """(kind, message) from asking the device; ("", "") if not RTSP."""
