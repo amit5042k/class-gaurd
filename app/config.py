@@ -23,7 +23,7 @@ def resource_path(*parts: str) -> str:
 
 class Config:
     APP_NAME = "ClassGuard - Camera Management System"
-    VERSION = "2.1.1"
+    VERSION = "2.1.2"
 
     DATA_DIR = os.path.join(os.path.expanduser("~"), ".classguard")
     DB_PATH = os.path.join(DATA_DIR, "classguard.db")
@@ -93,6 +93,10 @@ class Config:
     SAFETY_MODEL = {}  # {"weights": ..., "cfg": ..., "names": ...}
     AUTO_BACKUP = True
     LIVE_VIEWS = {}  # saved Live View window arrangements: name -> {windows, slots}
+    # Video decoder tried first: "rtp" = ClassGuard's direct decoder (fastest
+    # start), "opencv" = standard FFmpeg decoder, "pyav" = alternative decoder.
+    PREFERRED_DECODER = "rtp"
+    LEARNED_STREAMS = {}  # camera id -> {"backend", "transport"} that worked
 
     PERSISTED_KEYS = [
         "FACE_RECOGNITION_THRESHOLD", "STREAM_RECONNECT_DELAY", "RECORDING_FPS",
@@ -104,6 +108,7 @@ class Config:
         "RECORDING_SEGMENT_MINUTES", "RECORDING_RETENTION_DAYS", "RECORDING_MAX_GB",
         "RECORDING_MIN_FREE_GB", "RECORDING_MAX_WIDTH", "MOTION_SENSITIVITY",
         "MOTION_PRE_ROLL", "MOTION_POST_ROLL", "AUTO_BACKUP", "LIVE_VIEWS",
+        "PREFERRED_DECODER", "LEARNED_STREAMS",
     ]
 
     # {stream}: Hikvision 01 = main / 02 = sub; {sub}: Dahua & UNV 0 = main / 1 = sub.

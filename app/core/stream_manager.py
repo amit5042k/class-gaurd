@@ -35,8 +35,9 @@ SNAPSHOT_MSG = ("Still pictures (about 1 per second): the NVR's video arrives wi
                 "pictures. For live video turn off H.264+ / Smart Codec on the NVR and set "
                 "the I-frame interval to 25–50.")
 SNAPSHOT_SECONDS = 600     # then try live video again
-GREY_WARN_S = 20           # grey this long: warn / switch to still pictures
-GREY_SHOW_S = 30           # grey this long: show the grey pictures anyway
+GREY_WARN_S = 6            # grey this long: try the next decoder / still pictures
+GREY_SHOW_S = 12           # grey this long: show the grey pictures anyway
+PREVIEW_MSG = "Connecting… (showing a still picture until live video starts)"
 SILENT_MSG = ("The device accepts the connection but sends no video data. Is the camera "
               "on this channel online? Security software on this PC can also block it.")
 
@@ -157,6 +158,18 @@ def to_qimage(frame: np.ndarray, max_width: int = 0) -> QImage:
 
 BACKENDS = ("opencv", "rtp", "pyav")
 BACKEND_LABELS = {"opencv": "", "rtp": " (direct decoder)", "pyav": " (alt. decoder)"}
+DECODER_NAMES = {"opencv": "the standard decoder", "rtp": "the direct decoder",
+                 "pyav": "the alternative decoder"}
+
+
+def preferred_decoder() -> str:
+    """First decoder for a camera nothing is known about yet."""
+    from app.config import Config
+    pref = getattr(Config, "PREFERRED_DECODER", "rtp")
+    if pref == "rtp":
+        from app.core.av_capture import AVAILABLE
+        return "rtp" if AVAILABLE else "opencv"
+    return pref if pref in BACKENDS else "opencv"
 
 
 class _Retry(Exception):
@@ -185,24 +198,34 @@ class StreamThread(QThread):
         self._current = "udp" if self.transport == "udp" or \
             (self.transport == "auto" and first == "udp") else "tcp"
         self._backend = backend if backend in BACKENDS else "opencv"
+        self._first_backend = self._backend
         self._keyframe_request = keyframe_request
         self._snapshot = snapshot
         self._snapshot_ok = snapshot is not None
         self._snapshot_failures = 0
         self._last_display = 0.0
 
-    def _next_attempt(self) -> str:
-        """After "connected but no picture": try the direct decoder (our own RTSP
-        reader), then the alternative decoder, then the other transport."""
+    def _order(self) -> List[str]:
+        """Decoders to try, the one this camera started with first."""
         from app.core.av_capture import AVAILABLE
-        rtsp = str(self.rtsp_url).startswith("rtsp")
-        if self._backend == "opencv" and AVAILABLE and rtsp:
-            self._backend = "rtp"
-            return "the direct decoder"
-        if self._backend in ("opencv", "rtp") and AVAILABLE:
-            self._backend = "pyav"
-            return "the alternative decoder"
-        self._backend = "opencv"
+        usable = [b for b in BACKENDS
+                  if b == "opencv" or (AVAILABLE and (b != "rtp" or self._direct_possible()))]
+        first = self._first_backend if self._first_backend in usable else "opencv"
+        return [first] + [b for b in usable if b != first]
+
+    def _has_next_decoder(self) -> bool:
+        order = self._order()
+        return self._backend in order and order.index(self._backend) < len(order) - 1
+
+    def _next_attempt(self) -> str:
+        """After "connected but no picture": try the next decoder, then, once all
+        were tried, the other transport."""
+        order = self._order()
+        i = order.index(self._backend) if self._backend in order else -1
+        if i + 1 < len(order):
+            self._backend = order[i + 1]
+            return DECODER_NAMES[self._backend]
+        self._backend = order[0]
         if self._switch_transport():
             return self._current.upper()
         return ""
@@ -226,6 +249,7 @@ class StreamThread(QThread):
         last_kind = ""
         learned = False
         self.status_changed.emit(self.camera_id, False, CONNECTING)
+        self._show_preview()
         while self._running:
             cap = None
             got_frame = False
@@ -244,7 +268,7 @@ class StreamThread(QThread):
                     raise _Retry()
                 if pre_kind == "ok":
                     # Some devices briefly refuse a session right after another closes.
-                    self._sleep(1.0)
+                    self._sleep(0.5)
                 cap = open_capture(self.rtsp_url, self._current, self._backend)
                 if not cap.isOpened():
                     # Ask the device why (on the first failure and every 5th after),
@@ -256,8 +280,10 @@ class StreamThread(QThread):
                     # Some recorders refuse one RTSP transport (e.g. 461 Unsupported
                     # transport), so alternate unless the device gave a reason that
                     # another transport can't fix.
-                    if self._backend != "opencv":
-                        self._backend = "opencv"     # that decoder can't connect here
+                    if self._backend != "opencv" and self._has_next_decoder():
+                        self._next_attempt()         # that decoder can't connect here
+                    elif self._backend != "opencv":
+                        self._backend = "opencv"
                     elif last_kind not in ("unreachable", "auth", "not_found"):
                         self._switch_transport()
                     failures += 1
@@ -291,8 +317,8 @@ class StreamThread(QThread):
                                                              WAITING_KEYFRAME)
                                 elif not warned and now - waiting_since > GREY_WARN_S:
                                     warned = True
-                                    if self._backend == "opencv" and self._direct_possible():
-                                        break    # try the direct decoder (no picture yet)
+                                    if self._has_next_decoder():
+                                        break    # try the next decoder (no picture yet)
                                     if self._snapshot_ok:
                                         go_snapshot = True   # stills beat a grey tile
                                         break
@@ -310,7 +336,8 @@ class StreamThread(QThread):
                         if not got_frame:
                             got_frame = True
                             failures, reason, delay = 0, "", self._base_delay
-                            label = "Connected" + (" (UDP)" if self._current == "udp" else "") \
+                            label = "Connected" + (" (UDP)" if self._current == "udp"
+                                                   and self._backend != "rtp" else "") \
                                 + BACKEND_LABELS.get(self._backend, "")
                             self.status_changed.emit(self.camera_id, True,
                                                      NO_KEYFRAME_MSG if grey_shown else label)
@@ -369,6 +396,15 @@ class StreamThread(QThread):
         if force_display or now - self._last_display >= 1 / DISPLAY_FPS:
             self._last_display = now
             self.frame_ready.emit(self.camera_id, to_qimage(frame, DISPLAY_MAX_WIDTH))
+
+    def _show_preview(self):
+        """Show a still picture from the device at once, while video connects."""
+        if not self._snapshot_ok:
+            return
+        img = self._grab_snapshot()
+        if img is not None and self._running:
+            self._deliver(img, force_display=True)
+            self.status_changed.emit(self.camera_id, False, PREVIEW_MSG)
 
     def _grab_snapshot(self):
         try:
@@ -477,6 +513,16 @@ class StreamManager:
         self.frame_listeners: List[Callable] = []
         self.learned_transport: Dict[int, str] = {}
         self.learned_backend: Dict[int, str] = {}
+        from app.config import Config
+        for key, v in dict(getattr(Config, "LEARNED_STREAMS", {}) or {}).items():
+            try:
+                cid = int(key)
+            except ValueError:
+                continue
+            if v.get("transport") in ("tcp", "udp"):
+                self.learned_transport[cid] = v["transport"]
+            if v.get("backend") in BACKENDS:
+                self.learned_backend[cid] = v["backend"]
         self.reconnect_delay = 2
 
     def add_frame_listener(self, cb: Callable):
@@ -491,12 +537,10 @@ class StreamManager:
         thread = StreamThread(camera_id, rtsp_url, self.frame_listeners,
                               self.reconnect_delay, transport,
                               self.learned_transport.get(camera_id, "tcp"),
-                              self.learned_backend.get(camera_id, "opencv"),
+                              self.learned_backend.get(camera_id, preferred_decoder()),
                               keyframe_request, snapshot)
-        thread.transport_learned.connect(
-            lambda cid, t: self.learned_transport.__setitem__(cid, t))
-        thread.backend_learned.connect(
-            lambda cid, b: self.learned_backend.__setitem__(cid, b))
+        thread.transport_learned.connect(lambda cid, t: self._learn(cid, transport=t))
+        thread.backend_learned.connect(lambda cid, b: self._learn(cid, backend=b))
         if on_transport:
             thread.transport_learned.connect(on_transport)
         if on_frame:
@@ -506,6 +550,32 @@ class StreamManager:
         self._streams[camera_id] = thread
         thread.start()
         return thread
+
+    def _learn(self, cid: int, transport: str = None, backend: str = None):
+        """Remember what worked, also for the next start of the app, so the
+        camera connects at once instead of trying every decoder again."""
+        from app.config import Config
+        changed = False
+        if transport and self.learned_transport.get(cid) != transport:
+            self.learned_transport[cid] = transport
+            changed = True
+        if backend and self.learned_backend.get(cid) != backend:
+            self.learned_backend[cid] = backend
+            changed = True
+        if not changed:
+            return
+        store = dict(getattr(Config, "LEARNED_STREAMS", {}) or {})
+        entry = dict(store.get(str(cid), {}))
+        if cid in self.learned_transport:
+            entry["transport"] = self.learned_transport[cid]
+        if cid in self.learned_backend:
+            entry["backend"] = self.learned_backend[cid]
+        store[str(cid)] = entry
+        Config.LEARNED_STREAMS = store
+        try:
+            Config.save_settings()
+        except Exception as e:
+            logger.info("Could not save learned stream settings: %s", e)
 
     def stop_stream(self, camera_id: int):
         thread = self._streams.pop(camera_id, None)

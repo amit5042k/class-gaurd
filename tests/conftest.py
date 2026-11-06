@@ -30,8 +30,12 @@ def isolated_config(tmp_path, monkeypatch):
                 "AUTO_START_STREAMS", "FACE_RECOGNITION_THRESHOLD",
                 "RECORDING_SEGMENT_MINUTES", "RECORDING_RETENTION_DAYS", "RECORDING_MAX_GB",
                 "RECORDING_MIN_FREE_GB", "RECORDING_MAX_WIDTH", "MOTION_SENSITIVITY",
-                "MOTION_PRE_ROLL", "MOTION_POST_ROLL"):
+                "MOTION_PRE_ROLL", "MOTION_POST_ROLL", "LIVE_VIEWS"):
         monkeypatch.setattr(Config, key, getattr(Config, key))
+    monkeypatch.setattr(Config, "LEARNED_STREAMS", {})
+    # Most stream tests replace the standard (OpenCV) decoder with fakes; tests of
+    # the direct decoder choose it explicitly.
+    monkeypatch.setattr(Config, "PREFERRED_DECODER", "opencv")
     yield
 
 

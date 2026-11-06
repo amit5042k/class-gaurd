@@ -178,8 +178,13 @@ class VideoCell(QWidget):
                 self._badge("⚠ NO FULL PICTURE", "#f39c12", msg)
             else:
                 self._badge("", "", msg)
+        elif msg.startswith("Connect") and self._last_img is not None:
+            # Still connecting: keep the picture already shown (e.g. a still).
+            self._status_dot.setStyleSheet("color:#f39c12; font-size:14px;")
+            self._badge("CONNECTING", "#f39c12", msg)
         else:
             self._last_img = None
+            self._badge("", "", "")
             self._status_dot.setObjectName("disconnected_dot")
             self._canvas.setPixmap(QPixmap())  # clears text too, so do it first
             connecting = msg.startswith("Connecting")

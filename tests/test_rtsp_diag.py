@@ -362,6 +362,7 @@ def test_still_pictures_replace_endless_grey_video(qtbot, monkeypatch):
     monkeypatch.setattr(smod, "_open_guarded", lambda *a, **k: Grey())
     monkeypatch.setattr(smod.StreamThread, "_precheck", lambda self: ("", ""))
     monkeypatch.setattr(smod, "GREY_WARN_S", 0.3)
+    monkeypatch.setattr(smod.StreamThread, "_has_next_decoder", lambda self: False)
     still = np.full((360, 640, 3), (30, 90, 160), np.uint8)
     statuses, shown = [], []
     sm = smod.StreamManager()
@@ -369,10 +370,9 @@ def test_still_pictures_replace_endless_grey_video(qtbot, monkeypatch):
                     on_status=lambda c, ok, m: statuses.append((ok, m)),
                     on_frame=lambda c, img: shown.append(img.pixel(300, 200)))
     try:
-        qtbot.waitUntil(lambda: bool(shown), timeout=10000)
+        qtbot.waitUntil(lambda: (True, smod.SNAPSHOT_MSG) in statuses, timeout=10000)
         from PyQt6.QtGui import QColor
-        assert QColor(shown[0]).red() == 160               # the still, not grey video
-        assert (True, smod.SNAPSHOT_MSG) in statuses
+        assert shown and all(QColor(p).red() == 160 for p in shown)   # stills, never grey
     finally:
         sm.stop_all(wait_ms=10000)
 
@@ -446,3 +446,47 @@ def test_depacketizer_rebuilds_fragmented_picture():
     d.push(rtp(4, b"\x7c\x81" + b"CC", ts=2000))
     out = d.push(rtp(6, b"\x7c\x41" + b"DD", ts=2000, marker=True))   # seq 5 lost
     assert out == []                                            # damaged picture dropped
+
+
+def test_instant_start_with_direct_decoder_and_preview(qtbot, monkeypatch):
+    """New camera: still picture at once, live video from the direct decoder
+    within a second or two, and the decoder is remembered for next time."""
+    import shutil
+    import subprocess
+    import time
+    import cv2
+    import numpy as np
+    import pytest
+    from app.config import Config
+    from app.core import stream_manager as smod
+    from app.core.rtp_capture import AVAILABLE
+    if not AVAILABLE or not shutil.which("/usr/bin/python3.12"):
+        pytest.skip("needs PyAV and the GStreamer test server")
+    monkeypatch.setattr(Config, "PREFERRED_DECODER", "rtp")
+    import tempfile
+    img = tempfile.mktemp(suffix=".png")
+    cv2.imwrite(img, np.full((240, 320, 3), (30, 90, 160), np.uint8))
+    port = _free_port()
+    srv = subprocess.Popen(["/usr/bin/python3.12", "tests/rtsp_test_server.py", str(port), img,
+                            "h264", "20"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2.5)
+    still = np.full((240, 320, 3), (200, 200, 0), np.uint8)
+    statuses, frames = [], []
+    sm = smod.StreamManager()
+    t0 = time.monotonic()
+    sm.start_stream(1, f"rtsp://127.0.0.1:{port}/live", snapshot=lambda: still,
+                    on_status=lambda c, ok, m: statuses.append((time.monotonic() - t0, ok, m)),
+                    on_frame=lambda c, im: frames.append((time.monotonic() - t0, im.pixel(5, 5))))
+    try:
+        qtbot.waitUntil(lambda: any(ok for _, ok, _m in statuses), timeout=15000)
+        live_at = next(t for t, ok, _m in statuses if ok)
+        assert live_at < 5, statuses
+        assert frames[0][0] < live_at                       # the still came first
+        assert any(m == smod.PREVIEW_MSG for _, _ok, m in statuses)
+        assert "direct decoder" in next(m for _, ok, m in statuses if ok)
+        assert Config.LEARNED_STREAMS["1"]["backend"] == "rtp"
+        assert smod.StreamManager().learned_backend[1] == "rtp"   # survives a restart
+    finally:
+        sm.stop_all(wait_ms=10000)
+        srv.terminate()
+        srv.wait()
