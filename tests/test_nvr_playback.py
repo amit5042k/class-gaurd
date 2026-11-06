@@ -1,4 +1,5 @@
 """Playback of recordings stored on the NVR."""
+import re
 import shutil
 import socket
 import subprocess
@@ -167,3 +168,145 @@ def test_play_save_clip_and_snapshot_from_recorder(qtbot, tmp_path, monkeypatch)
         tab.shutdown()
         srv.terminate()
         srv.wait()
+
+
+class _KeepAliveServer:
+    """RTSP server that streams dummy RTP and records what the client sends;
+    it refuses GET_PARAMETER like some recorders do."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.port = self.sock.getsockname()[1]
+        self.methods, self.rtcp = [], []
+        import threading
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        import threading
+        conn, _ = self.sock.accept()
+        playing = threading.Event()
+
+        def pump():
+            playing.wait()
+            seq = 0
+            try:
+                while True:
+                    seq += 1
+                    pkt = (b"\x80\xe0" + seq.to_bytes(2, "big") + (seq * 3000).to_bytes(4, "big")
+                           + b"\x11\x22\x33\x44" + b"\x41" + b"\x00" * 20)
+                    conn.sendall(b"$\x00" + len(pkt).to_bytes(2, "big") + pkt)
+                    time.sleep(0.05)
+            except OSError:
+                pass
+        threading.Thread(target=pump, daemon=True).start()
+        buf = b""
+        with conn:
+            while True:
+                try:
+                    data = conn.recv(4096)
+                except OSError:
+                    return
+                if not data:
+                    return
+                buf += data
+                while buf:
+                    if buf[:1] == b"$":
+                        if len(buf) < 4:
+                            break
+                        n = int.from_bytes(buf[2:4], "big")
+                        if len(buf) < 4 + n:
+                            break
+                        self.rtcp.append((buf[1], buf[4:4 + n]))
+                        buf = buf[4 + n:]
+                        continue
+                    if b"\r\n\r\n" not in buf:
+                        break
+                    req, buf = buf.split(b"\r\n\r\n", 1)
+                    text = req.decode()
+                    method = text.split(" ")[0]
+                    self.methods.append(method)
+                    cseq = re.search(r"CSeq: (\d+)", text).group(1)
+                    if method == "DESCRIBE":
+                        sdp = ("v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+                               "a=control:trackID=1\r\n")
+                        reply = (f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Type: "
+                                 f"application/sdp\r\nContent-Length: {len(sdp)}\r\n\r\n{sdp}")
+                    elif method == "GET_PARAMETER":
+                        reply = f"RTSP/1.0 501 Not Implemented\r\nCSeq: {cseq}\r\n\r\n"
+                    else:
+                        reply = (f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nSession: 77\r\n"
+                                 f"Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n")
+                    conn.sendall(reply.encode())
+                    if method == "PLAY":
+                        playing.set()
+
+    def close(self):
+        self.sock.close()
+
+
+def test_direct_decoder_keeps_the_session_alive(monkeypatch):
+    from app.core import rtp_capture
+    if not rtp_capture.AVAILABLE:
+        pytest.skip("needs PyAV")
+    monkeypatch.setattr(rtp_capture, "KEEPALIVE_S", 0.4)
+    monkeypatch.setattr(rtp_capture, "RTCP_RR_S", 0.3)
+    srv = _KeepAliveServer()
+    cap = rtp_capture.RTPCapture(f"rtsp://127.0.0.1:{srv.port}/Streaming/tracks/101/"
+                                 "?starttime=20261106T080000Z", read_timeout_s=3)
+    try:
+        assert cap.isOpened(), cap.error
+        deadline = time.time() + 6
+        while time.time() < deadline and not (
+                "OPTIONS" in srv.methods and len(srv.rtcp) >= 2):
+            time.sleep(0.1)
+        assert "GET_PARAMETER" in srv.methods and "OPTIONS" in srv.methods  # fell back
+        ch, rr = srv.rtcp[0]
+        assert ch == 1 and rr[1] == 201 and rr[8:12] == b"\x11\x22\x33\x44"  # receiver report
+        assert int.from_bytes(rr[16:20], "big") > 0                            # highest seq
+        assert cap.error is None
+    finally:
+        cap.release()
+        srv.close()
+
+
+def test_playback_continues_when_the_recorder_ends_the_session(qtbot, monkeypatch):
+    import numpy as np
+    from app.core import stream_manager as smod
+    from app.ui.pages import nvr_playback as page_mod
+
+    class ShortSession:                       # 15 pictures, then the NVR hangs up
+        def __init__(self):
+            self.left = 15
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            time.sleep(0.02)
+            if self.left <= 0:
+                return False, None
+            self.left -= 1
+            return True, np.full((90, 160, 3), 120 + self.left, np.uint8)
+
+        def release(self):
+            pass
+    monkeypatch.setattr(smod, "open_capture", lambda *a, **k: ShortSession())
+    asked = []
+    start = datetime(2026, 11, 6, 8, 0, 0)
+    t = page_mod.PlaybackThread("rtsp://nvr/first", start,
+                                url_for=lambda s: asked.append(s) or "rtsp://nvr/next")
+    ended, positions = [], []
+    t.finished_playing.connect(ended.append)
+    t.position.connect(positions.append)
+    t.start()
+    try:
+        qtbot.waitUntil(lambda: bool(ended), timeout=20000)
+    finally:
+        t.stop()
+        t.wait(5000)
+    assert len(asked) == page_mod.MAX_RESUMES                  # continued each time
+    assert all(b > a for a, b in zip(asked, asked[1:]))        # from where it was
+    assert asked[0] > start and positions[-1] > asked[-1]
+    assert ended == ["The recording ended."]

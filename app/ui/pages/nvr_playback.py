@@ -23,6 +23,7 @@ from app.ui.widgets.zone_canvas import VideoCanvas
 logger = logging.getLogger(__name__)
 
 FIRST_PICTURE_TIMEOUT_S = 15
+MAX_RESUMES = 5            # reconnects in a row without a good stretch of playback
 DISPLAY_FPS = 15
 
 
@@ -35,15 +36,18 @@ class PlaybackThread(QThread):
     status = pyqtSignal(str)
     finished_playing = pyqtSignal(str)     # reason
 
-    def __init__(self, url: str, start: datetime, parent=None):
+    def __init__(self, url: str, start: datetime, parent=None, url_for=None):
         super().__init__(parent)
         self.url = url
         self.start_time = start
+        self.url_for = url_for         # start time -> playback address (to continue)
         self._running = True
         self.last_frame = None
         self._clip_path: Optional[str] = None
         self._writer = None
-        self._lock_clip = False
+        self._frames = 0
+        self._t_clip = None
+        self._backend: Optional[str] = None
 
     def stop(self):
         self._running = False
@@ -57,23 +61,61 @@ class PlaybackThread(QThread):
 
     def _backends(self) -> List[str]:
         from app.core.av_capture import AVAILABLE
-        return (["rtp"] if AVAILABLE else []) + ["opencv"]
+        order = (["rtp"] if AVAILABLE else []) + ["opencv"]
+        if self._backend in order:              # the one that worked first
+            order.remove(self._backend)
+            order.insert(0, self._backend)
+        return order
 
     def run(self):
+        """Play; if the recorder ends the session early (many do after about a
+        minute), continue from the same moment, so playback doesn't stop."""
+        pos, url = self.start_time, self.url
+        day_end = datetime.combine(self.start_time.date(), datetime.max.time())
+        resumes = 0
+        try:
+            while self._running:
+                t0 = time.monotonic()
+                reached, reason = self._play_once(url, pos)
+                if not self._running:
+                    return
+                if reached is None:                    # no picture this time
+                    if resumes == 0 or resumes >= MAX_RESUMES:
+                        self.finished_playing.emit(reason)
+                        return
+                    resumes += 1
+                    time.sleep(1)
+                    continue
+                pos = reached
+                if time.monotonic() - t0 > 30:
+                    resumes = 0                        # it played a good while: start over
+                near_end = pos >= min(day_end, datetime.now()) - timedelta(seconds=5)
+                if self.url_for is None or near_end or resumes >= MAX_RESUMES:
+                    self.finished_playing.emit("The recording ended.")
+                    return
+                resumes += 1
+                self.status.emit("Continuing…")
+                logger.info("Playback session ended at %s; continuing", pos)
+                url = self.url_for(pos)
+        finally:
+            self._close_clip()
+
+    def _play_once(self, url: str, start: datetime):
+        """(position reached or None if no picture, reason)."""
         from app.core.stream_manager import is_placeholder_frame, open_capture, to_qimage
-        reason = "The recording ended."
+        reason = "No picture from the recorder for that time."
         for backend in self._backends():
             if not self._running:
-                return
+                return None, ""
             self.status.emit("Connecting to the recorder…")
-            cap = open_capture(self.url, "tcp", backend)
+            cap = open_capture(url, "tcp", backend)
             try:
                 if not cap.isOpened():
                     reason = "The recorder refused the playback request (no recording at " \
                              "that time, or it allows no more playback sessions)."
                     continue
                 t_open, t_first, shown = time.monotonic(), None, 0.0
-                frames = 0
+                pos = None
                 while self._running:
                     ok, frame = cap.read()
                     if not ok or frame is None:
@@ -83,32 +125,36 @@ class PlaybackThread(QThread):
                                 time.monotonic() - t_open < FIRST_PICTURE_TIMEOUT_S:
                             continue          # wait for the first full picture
                         t_first = time.monotonic()
+                        self._backend = backend
                         self.status.emit("Playing")
-                    frames += 1
+                    self._frames += 1
                     self.last_frame = frame
-                    self._write_clip(frame, frames, t_first)
+                    self._write_clip(frame)
                     now = time.monotonic()
+                    pos = start + timedelta(seconds=now - t_first)
                     if now - shown >= 1 / DISPLAY_FPS:
                         shown = now
                         self.frame_ready.emit(to_qimage(frame, 1280))
-                        self.position.emit(self.start_time + timedelta(seconds=now - t_first))
+                        self.position.emit(pos)
                 if t_first is not None:
-                    reason = "The recording ended." if self._running else ""
-                    break
-                reason = "No picture from the recorder for that time."
+                    return pos, ""
             finally:
                 cap.release()
-                self._close_clip()
-        if self._running:
-            self.finished_playing.emit(reason)
+        return None, reason
 
-    def _write_clip(self, frame, frames: int, t_first: float):
+    def _write_clip(self, frame):
         if not self._clip_path:
             self._close_clip()
             return
         if self._writer is None:
-            elapsed = max(0.5, time.monotonic() - t_first)
-            fps = min(30.0, max(5.0, frames / elapsed)) if frames > 10 else 20.0
+            if self._t_clip is None:              # measure the frame rate for a second
+                self._t_clip, self._clip_start_frames = time.monotonic(), self._frames
+                return
+            elapsed = time.monotonic() - self._t_clip
+            counted = self._frames - self._clip_start_frames
+            if elapsed < 1.0:
+                return
+            fps = min(30.0, max(5.0, counted / elapsed))
             h, w = frame.shape[:2]
             os.makedirs(os.path.dirname(self._clip_path), exist_ok=True)
             self._writer = cv2.VideoWriter(self._clip_path, cv2.VideoWriter_fourcc(*"mp4v"),
@@ -116,6 +162,7 @@ class PlaybackThread(QThread):
         self._writer.write(frame)
 
     def _close_clip(self):
+        self._t_clip = None
         if self._writer is not None:
             self._writer.release()
             self._writer = None
@@ -301,7 +348,7 @@ class NVRPlaybackTab(QWidget):
         self.timeline.set_marker(when)
         self.pos_lbl.setText(when.strftime("%d %b %H:%M:%S"))
         self.video.clear_image("Connecting to the recorder…")
-        t = PlaybackThread(url, when)
+        t = PlaybackThread(url, when, url_for=lambda start, cam=cam: playback_url(cam, start))
         t.frame_ready.connect(self.video.set_image)
         t.position.connect(self._on_position)
         t.status.connect(self.status_lbl.setText)

@@ -11,6 +11,8 @@ Same interface as cv2.VideoCapture: isOpened(), read(), release().
 import base64
 import logging
 import queue
+import random
+import re
 import socket
 import threading
 import time
@@ -28,7 +30,15 @@ except Exception:  # pragma: no cover - optional dependency
     AVAILABLE = False
 
 START = b"\x00\x00\x00\x01"
-KEEPALIVE_S = 25
+KEEPALIVE_S = 25          # at most; shorter when the device's session timeout is short
+RTCP_RR_S = 5             # receiver reports: some recorders end playback without them
+
+
+def _rtcp_rr(own_ssrc: int, sender_ssrc: int, highest_seq: int) -> bytes:
+    """RTCP receiver report with one report block (RFC 3550)."""
+    return (bytes([0x81, 201]) + (7).to_bytes(2, "big") + own_ssrc.to_bytes(4, "big")
+            + sender_ssrc.to_bytes(4, "big") + b"\x00\x00\x00\x00"
+            + (highest_seq & 0xFFFFFFFF).to_bytes(4, "big") + b"\x00" * 12)
 
 
 def _sprop(sdp: str, codec: str) -> List[bytes]:
@@ -196,7 +206,12 @@ class RTPCapture:
         code, h = c.request("SETUP", control, ["Transport: RTP/AVP/TCP;unicast;interleaved=0-1"])
         if code != 200:
             raise ConnectionError(f"SETUP answered {code}")
-        self._session = (h.get("session") or [""])[0].split(";")[0]
+        session = (h.get("session") or [""])[0]
+        self._session = session.split(";")[0]
+        self._keepalive_s = KEEPALIVE_S
+        m = re.search(r"timeout=(\d+)", session)
+        if m and int(m.group(1)) > 0:
+            self._keepalive_s = max(5, min(KEEPALIVE_S, int(m.group(1)) // 3))
         transport = (h.get("transport") or [""])[0]
         self._channel = 0
         if "interleaved=" in transport:
@@ -217,9 +232,54 @@ class RTPCapture:
         self._thread.start()
 
     # ------------------------------------------------------------- receiving
+    def _send_keepalive(self):
+        c = self._client
+        c.cseq += 1
+        method = self._ka_method
+        uri = self._base
+        msg = [f"{method} {uri} RTSP/1.0", f"CSeq: {c.cseq}",
+               f"Session: {self._session}", "User-Agent: ClassGuard"]
+        auth = c._auth(method, uri)
+        if auth:
+            msg.append(f"Authorization: {auth}")
+        c.sock.sendall(("\r\n".join(msg) + "\r\n\r\n").encode())
+
+    def _on_reply(self, head: bytes) -> bool:
+        """A keep-alive reply. Returns True when the keep-alive should be resent."""
+        text = head.decode("latin-1", "replace")
+        m = re.match(r"RTSP/\d\.\d\s+(\d{3})", text)
+        if not m:
+            return False
+        code = int(m.group(1))
+        if code == 401:
+            dig = re.search(r"WWW-Authenticate:\s*Digest\s+(.*)", text, re.I)
+            if dig and self._auth_retries < 2:
+                self._auth_retries += 1
+                self._client.challenge = ("digest", dig.group(1).strip())
+                return True                  # new nonce: send again at once
+        elif code != 200 and self._ka_method == "GET_PARAMETER":
+            self._ka_method = "OPTIONS"      # not supported here: use OPTIONS instead
+            return True
+        else:
+            self._auth_retries = 0
+        return False
+
+    def _send_rtcp(self):
+        if self._sender_ssrc is None:
+            return
+        rr = _rtcp_rr(self._own_ssrc, self._sender_ssrc, self._highest_seq)
+        ch = self._channel + 1
+        self._client.sock.sendall(b"$" + bytes([ch]) + len(rr).to_bytes(2, "big") + rr)
+
     def _loop(self):
         c = self._client
-        last_keepalive = time.monotonic()
+        last_keepalive = last_rtcp = time.monotonic()
+        self._ka_method = "GET_PARAMETER"
+        self._auth_retries = 0
+        self._own_ssrc = random.getrandbits(32)
+        self._sender_ssrc = None
+        self._highest_seq = 0
+        cycles = 0
         started = False                # decode only from the first keyframe on
         try:
             c.sock.settimeout(self.read_timeout)
@@ -232,6 +292,15 @@ class RTPCapture:
                     c.buf = c.buf[4 + n:]
                     if ch != self._channel:
                         continue           # RTCP or another track
+                    if len(pkt) >= 12:
+                        seq = int.from_bytes(pkt[2:4], "big")
+                        if self._sender_ssrc is None:
+                            self._sender_ssrc = int.from_bytes(pkt[8:12], "big")
+                            self._highest_seq = seq
+                        elif ((seq - self._highest_seq) & 0xFFFF) < 0x8000:
+                            if seq < (self._highest_seq & 0xFFFF):
+                                cycles += 1          # sequence number wrapped
+                            self._highest_seq = (cycles << 16) | seq
                     for au, key in self._depack.push(pkt):
                         if key:
                             started = True
@@ -243,21 +312,24 @@ class RTPCapture:
                     i = c.buf.find(b"$")
                     head = c.buf if i < 0 else c.buf[:i]
                     if b"\r\n\r\n" in head:            # e.g. keep-alive reply
-                        c.buf = c.buf[head.index(b"\r\n\r\n") + 4:]
+                        end = head.index(b"\r\n\r\n") + 4
+                        reply, c.buf = c.buf[:end], c.buf[end:]
+                        length = re.search(rb"Content-Length:\s*(\d+)", reply, re.I)
+                        if length:
+                            c.buf = c.buf[int(length.group(1)):]
+                        if self._on_reply(reply):
+                            self._send_keepalive()
                         continue
                     if i > 0 and b"RTSP/" not in head:
                         c.buf = c.buf[i:]               # resync on garbage
                         continue
                 now = time.monotonic()
-                if now - last_keepalive > KEEPALIVE_S:
+                if now - last_keepalive > self._keepalive_s:
                     last_keepalive = now
-                    c.cseq += 1
-                    msg = [f"GET_PARAMETER {self._base} RTSP/1.0", f"CSeq: {c.cseq}",
-                           f"Session: {self._session}", "User-Agent: ClassGuard"]
-                    auth = c._auth("GET_PARAMETER", self._base)
-                    if auth:
-                        msg.append(f"Authorization: {auth}")
-                    c.sock.sendall(("\r\n".join(msg) + "\r\n\r\n").encode())
+                    self._send_keepalive()
+                if now - last_rtcp > RTCP_RR_S:
+                    last_rtcp = now
+                    self._send_rtcp()
                 chunk = c.sock.recv(65536)
                 if not chunk:
                     raise ConnectionError("the device closed the connection")
