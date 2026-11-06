@@ -265,3 +265,65 @@ def test_tile_says_device_sends_nothing(qtbot):
     finally:
         sm.stop_all(wait_ms=30000)
         m.close()
+
+
+def _grey_with_clock():
+    import numpy as np
+    f = np.full((360, 640, 3), 128, np.uint8)
+    f[10:30, 20:120] = (20, 200, 20)     # only the on-screen clock is drawn
+    return f
+
+
+def test_placeholder_frame_detection():
+    import numpy as np
+    from app.core.stream_manager import is_placeholder_frame
+    assert is_placeholder_frame(_grey_with_clock())
+    real = np.random.default_rng(1).integers(0, 255, (360, 640, 3), dtype=np.uint8)
+    assert not is_placeholder_frame(real)
+    assert not is_placeholder_frame(np.zeros((360, 640, 3), np.uint8))     # night scene
+
+
+def test_grey_frames_are_held_back_and_keyframe_requested(qtbot, monkeypatch):
+    import numpy as np
+    from app.core import stream_manager as smod
+    real = np.full((360, 640, 3), (30, 90, 160), np.uint8)
+    frames = [_grey_with_clock()] * 30 + [real] * 30
+
+    class Fake:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            import time
+            time.sleep(0.01)
+            return (True, frames.pop(0)) if frames else (False, None)
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(smod, "_open_guarded", lambda *a, **k: Fake())
+    monkeypatch.setattr(smod.StreamThread, "_precheck", lambda self: ("", ""))
+    requests, statuses, shown = [], [], []
+    sm = smod.StreamManager()
+    sm.start_stream(1, "rtsp://cam/x", keyframe_request=lambda: requests.append(1),
+                    on_status=lambda c, ok, m: statuses.append((ok, m)),
+                    on_frame=lambda c, img: shown.append(img.pixel(300, 200)))
+    try:
+        qtbot.waitUntil(lambda: bool(shown), timeout=10000)
+        assert any(m == smod.WAITING_KEYFRAME for _, m in statuses)
+        assert requests                                  # keyframe asked for
+        from PyQt6.QtGui import QColor
+        assert QColor(shown[0]).red() == 160             # first shown frame is the real one
+    finally:
+        sm.stop_all(wait_ms=10000)
+
+
+def test_hikvision_keyframe_request_paths():
+    from app.protocols.hikvision import HikvisionAPI
+    from tests.test_live_and_playback import FakeResponse, FakeSession
+    api = HikvisionAPI("10.0.5.1", 80, "admin", "pw")
+    api.session = FakeSession({"/Streaming/channels/102/requestKeyFrame": FakeResponse(404)})
+    assert api.request_keyframe(102)
+    urls = [u for _, u, _ in api.session.calls]
+    assert urls[0].endswith("/ISAPI/Streaming/channels/102/requestKeyFrame")
+    assert urls[1].endswith("/ISAPI/ContentMgmt/StreamingProxy/channels/102/requestKeyFrame")

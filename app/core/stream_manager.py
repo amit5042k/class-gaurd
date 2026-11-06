@@ -10,6 +10,9 @@ import threading
 # it briefly (see _TransportLock).
 _DEFAULT_OPTIONS = "rtsp_transport;tcp"
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", _DEFAULT_OPTIONS)
+# Let OpenCV keep decoding while it waits for a keyframe (default 64 attempts is
+# too few for streams with long keyframe intervals such as H.264+/Smart Codec).
+os.environ.setdefault("OPENCV_FFMPEG_DECODE_ATTEMPTS", "20000")
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
@@ -23,6 +26,10 @@ READ_TIMEOUT_MS = 10_000
 DISPLAY_MAX_WIDTH = 1280
 DISPLAY_FPS = 15  # screen refresh cap; recording and AI still get every frame
 CONNECTING = "Connecting…"
+WAITING_KEYFRAME = ("Connected. Waiting for a full picture from the camera (keyframe)…")
+NO_KEYFRAME_MSG = ("Connected, but the camera hasn't sent a full picture yet. On the NVR/camera, "
+                   "turn off H.264+ / H.265+ / Smart Codec and set the I-frame interval "
+                   "to 25–50 for this stream.")
 SILENT_MSG = ("The device accepts the connection but sends no video data. Is the camera "
               "on this channel online? Security software on this PC can also block it.")
 
@@ -115,6 +122,14 @@ def open_capture(source: str, transport: str = "tcp", backend: str = "opencv"):
     return _open_guarded(source, params, "rtsp_transport;udp" if udp else _DEFAULT_OPTIONS)
 
 
+def is_placeholder_frame(frame: np.ndarray) -> bool:
+    """True for the flat mid-grey image a decoder outputs before it has a
+    keyframe (only moving bits such as an on-screen clock are drawn)."""
+    small = cv2.resize(frame, (64, 36), interpolation=cv2.INTER_AREA).astype(np.int16)
+    grey = np.all(np.abs(small - 128) <= 6, axis=2)
+    return float(grey.mean()) > 0.85
+
+
 def to_qimage(frame: np.ndarray, max_width: int = 0) -> QImage:
     if max_width and frame.shape[1] > max_width:
         scale = max_width / frame.shape[1]
@@ -139,7 +154,8 @@ class StreamThread(QThread):
 
     def __init__(self, camera_id: int, rtsp_url: str,
                  listeners: List[Callable], reconnect_delay: float = 2,
-                 transport: str = "auto", first: str = "tcp", backend: str = "opencv"):
+                 transport: str = "auto", first: str = "tcp", backend: str = "opencv",
+                 keyframe_request: Optional[Callable] = None):
         super().__init__()
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
@@ -151,6 +167,7 @@ class StreamThread(QThread):
         self._current = "udp" if self.transport == "udp" or \
             (self.transport == "auto" and first == "udp") else "tcp"
         self._backend = backend if backend in ("opencv", "pyav") else "opencv"
+        self._keyframe_request = keyframe_request
 
     def _next_attempt(self) -> str:
         """After "connected but no picture": try the other decoder first (some
@@ -216,16 +233,41 @@ class StreamThread(QThread):
                                              reason or "Cannot open stream")
                 else:
                     bad_reads = 0
+                    full_seen = False
+                    waiting_since = None
+                    warned = False
+                    last_kf_request = 0.0
+                    self._request_keyframe()
                     while self._running:
                         ok, frame = cap.read()
                         if not ok or frame is None:
                             bad_reads += 1
                             # A single failed read is often a glitch; give up on the
                             # connection only after several in a row.
-                            if bad_reads >= 3 or not got_frame:
+                            if bad_reads >= 3 or not (got_frame or waiting_since):
                                 break
                             continue
                         bad_reads = 0
+                        if not full_seen:
+                            if is_placeholder_frame(frame):
+                                # Don't show grey half-pictures; ask for a keyframe.
+                                now = time.monotonic()
+                                if waiting_since is None:
+                                    waiting_since = now
+                                    self.status_changed.emit(self.camera_id, False,
+                                                             WAITING_KEYFRAME)
+                                elif not warned and now - waiting_since > 20:
+                                    warned = True
+                                    self.status_changed.emit(self.camera_id, False,
+                                                             NO_KEYFRAME_MSG)
+                                if now - last_kf_request > 8:
+                                    last_kf_request = now
+                                    self._request_keyframe()
+                                if now - waiting_since < 30:
+                                    continue
+                                # A real flat grey scene, or no keyframes at all:
+                                # show what we have rather than nothing.
+                            full_seen = True
                         if not got_frame:
                             got_frame = True
                             failures, reason, delay = 0, "", self._base_delay
@@ -278,6 +320,17 @@ class StreamThread(QThread):
             if self._running:
                 self._sleep(delay)
                 delay = min(delay * 2, 30)
+
+    def _request_keyframe(self):
+        if self._keyframe_request is None:
+            return
+        threading.Thread(target=self._safe_keyframe, daemon=True).start()
+
+    def _safe_keyframe(self):
+        try:
+            self._keyframe_request()
+        except Exception as e:
+            logger.info("Keyframe request failed for camera %s: %s", self.camera_id, e)
 
     def _device_sends_nothing(self) -> bool:
         if not str(self.rtsp_url).startswith("rtsp"):
@@ -344,12 +397,13 @@ class StreamManager:
 
     def start_stream(self, camera_id: int, rtsp_url: str,
                      on_frame=None, on_status=None, transport: str = "auto",
-                     on_transport=None) -> StreamThread:
+                     on_transport=None, keyframe_request=None) -> StreamThread:
         self.stop_stream(camera_id)
         thread = StreamThread(camera_id, rtsp_url, self.frame_listeners,
                               self.reconnect_delay, transport,
                               self.learned_transport.get(camera_id, "tcp"),
-                              self.learned_backend.get(camera_id, "opencv"))
+                              self.learned_backend.get(camera_id, "opencv"),
+                              keyframe_request)
         thread.transport_learned.connect(
             lambda cid, t: self.learned_transport.__setitem__(cid, t))
         thread.backend_learned.connect(

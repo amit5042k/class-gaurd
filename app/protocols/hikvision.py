@@ -72,6 +72,20 @@ class HikvisionAPI:
     def ptz_stop(self, channel: int) -> bool:
         return self._continuous(channel, 0, 0, 0)
 
+    def request_keyframe(self, stream_id: int) -> bool:
+        """Ask for an I-frame now (stream_id e.g. 102 = channel 1 sub-stream), so a
+        viewer that just connected gets a full picture straight away."""
+        for path in (f"/Streaming/channels/{stream_id}/requestKeyFrame",
+                     f"/ContentMgmt/StreamingProxy/channels/{stream_id}/requestKeyFrame"):
+            try:
+                r = self.session.put(f"{self.base}{path}", timeout=TIMEOUT)
+            except requests.RequestException as e:
+                logger.info("requestKeyFrame %s: %s", path, e)
+                return False
+            if r.status_code in (200, 201):
+                return True
+        return False
+
     def ptz_goto_preset(self, channel: int, preset: int) -> bool:
         r = self.session.put(f"{self.base}/PTZCtrl/channels/{channel}/presets/{preset}/goto",
                              timeout=TIMEOUT)

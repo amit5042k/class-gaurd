@@ -18,6 +18,19 @@ from app.ui.widgets.ptz_panel import PTZPanel
 ALL_GROUPS = "All groups"
 
 
+def keyframe_requester(cam: Dict):
+    """Callable asking the device for a keyframe (Hikvision ISAPI), or None."""
+    if cam.get("brand") != "Hikvision" or cam.get("custom_rtsp_url"):
+        return None
+    stream_id = int(cam.get("channel") or 1) * 100 + (2 if cam.get("use_substream") else 1)
+
+    def request():
+        from app.protocols.hikvision import HikvisionAPI
+        HikvisionAPI(cam["host"], cam.get("http_port") or 80, cam.get("username", ""),
+                     cam.get("password", "")).request_keyframe(stream_id)
+    return request
+
+
 class LiveView(QWidget):
     active_count_changed = pyqtSignal(int)
     message = pyqtSignal(str)
@@ -232,7 +245,8 @@ class LiveView(QWidget):
             self._pinned.add(camera_id)
         self.sm.start_stream(cam["id"], cam["rtsp_url"],
                              on_frame=self._grid.update_frame, on_status=self._on_status,
-                             transport=cam.get("rtsp_transport") or "auto")
+                             transport=cam.get("rtsp_transport") or "auto",
+                             keyframe_request=keyframe_requester(cam))
         self._emit_count()
         return True
 
