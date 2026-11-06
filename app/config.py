@@ -23,7 +23,7 @@ def resource_path(*parts: str) -> str:
 
 class Config:
     APP_NAME = "ClassGuard - Camera Management System"
-    VERSION = "2.0.8"
+    VERSION = "2.1.0"
 
     DATA_DIR = os.path.join(os.path.expanduser("~"), ".classguard")
     DB_PATH = os.path.join(DATA_DIR, "classguard.db")
@@ -60,6 +60,15 @@ class Config:
     EXPRESSIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
     ALERT_EXPRESSIONS = ["angry", "fear", "disgust"]
     EXPRESSION_ALERT_CONFIDENCE = 60.0
+    # Class mood alarm: share of negative expressions (angry, fear, disgust, sad)
+    # among the faces a camera saw over the window.
+    CLASS_MOOD_ALARM = True
+    CLASS_MOOD_ALERT_PERCENT = 40.0
+    CLASS_MOOD_WINDOW = 60
+    CLASS_MOOD_MIN_FACES = 8
+    # Person tracking: store sightings of recognised faces
+    PERSON_TRACKING = True
+    TRACKING_RETENTION_DAYS = 30
 
     GRID_LAYOUTS = [(1, 1), (2, 2), (3, 3), (4, 4), (2, 3), (3, 4)]
     MAX_CAMERAS_DISPLAY = 16
@@ -83,15 +92,18 @@ class Config:
     ALERT_UNKNOWN_FACES = False
     SAFETY_MODEL = {}  # {"weights": ..., "cfg": ..., "names": ...}
     AUTO_BACKUP = True
+    LIVE_VIEWS = {}  # saved Live View window arrangements: name -> {windows, slots}
 
     PERSISTED_KEYS = [
         "FACE_RECOGNITION_THRESHOLD", "STREAM_RECONNECT_DELAY", "RECORDING_FPS",
         "SHIFT_START", "LATE_GRACE_MINUTES", "WEEKLY_OFF_DAYS", "AUTO_START_STREAMS",
         "ALERT_SOUND", "ALERT_UNKNOWN_FACES", "ALERT_COOLDOWN",
-        "EXPRESSION_ALERT_CONFIDENCE", "SAFETY_MODEL",
+        "EXPRESSION_ALERT_CONFIDENCE", "SAFETY_MODEL", "CLASS_MOOD_ALARM",
+        "CLASS_MOOD_ALERT_PERCENT", "CLASS_MOOD_WINDOW", "CLASS_MOOD_MIN_FACES",
+        "PERSON_TRACKING", "TRACKING_RETENTION_DAYS",
         "RECORDING_SEGMENT_MINUTES", "RECORDING_RETENTION_DAYS", "RECORDING_MAX_GB",
         "RECORDING_MIN_FREE_GB", "RECORDING_MAX_WIDTH", "MOTION_SENSITIVITY",
-        "MOTION_PRE_ROLL", "MOTION_POST_ROLL", "AUTO_BACKUP",
+        "MOTION_PRE_ROLL", "MOTION_POST_ROLL", "AUTO_BACKUP", "LIVE_VIEWS",
     ]
 
     # {stream}: Hikvision 01 = main / 02 = sub; {sub}: Dahua & UNV 0 = main / 1 = sub.

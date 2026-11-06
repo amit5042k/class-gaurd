@@ -32,6 +32,8 @@ class AIWorker(QThread):
     safety_result = pyqtSignal(int, list)
     attendance_event = pyqtSignal(dict)
     alert_created = pyqtSignal(dict)
+    class_mood = pyqtSignal(int, dict)        # camera_id, summary (see class_mood.py)
+    person_seen = pyqtSignal(dict)            # a tracked person was recognised
     model_status = pyqtSignal(str)
 
     def __init__(self, db, face_engine: FaceEngine, parent=None):
@@ -40,6 +42,10 @@ class AIWorker(QThread):
         self.face_engine = face_engine
         self.attendance = AttendanceEngine(db)
         self.alerts = AlertService(db)
+        from app.core.class_mood import ClassMoodTracker
+        from app.core.tracking import TrackingService
+        self.mood = ClassMoodTracker()
+        self.tracking = TrackingService(db)
         self._lock = threading.Lock()
         self._frames: Dict[int, tuple] = {}          # cid -> (frame, seq)
         self._seq = 0
@@ -158,6 +164,10 @@ class AIWorker(QThread):
     def _run_faces(self, cid, cam, name, frame):
         faces = self.face_engine.recognize_faces(
             frame, Config.FACE_RECOGNITION_THRESHOLD, Config.FACE_DETECTION_SCALE)
+        if Config.PERSON_TRACKING and any(f.get("person_id") is not None for f in faces):
+            for seen in self.tracking.record(cid, frame, faces):
+                seen["camera_name"] = name
+                self.person_seen.emit(seen)
         if cam.get("attendance_tracking"):
             for ev in self.attendance.process(cid, frame, faces):
                 ev["camera_name"] = name
@@ -179,6 +189,15 @@ class AIWorker(QThread):
             self.annotated_frame.emit(EXPRESSION, cid, to_qimage(annotated))
         if not ee.available or not results:
             return
+        mood = self.mood.add(cid, [r["dominant_emotion"] for r in results])
+        self.class_mood.emit(cid, mood)
+        if Config.CLASS_MOOD_ALARM and self.mood.alarm(mood):
+            self._emit_alert(self.alerts.raise_alert(
+                cid, "Class mood",
+                f"Class mood alarm at {name}: {mood['negative_pct']:.0f}% of faces look "
+                f"upset (mostly {mood['dominant_negative']}) over the last "
+                f"{int(Config.CLASS_MOOD_WINDOW)} s",
+                "high", annotated, key=(cid, "class_mood")))
         now = time.monotonic()
         if now - self._last_expr_log.get(cid, 0) >= Config.EXPRESSION_LOG_INTERVAL:
             self._last_expr_log[cid] = now

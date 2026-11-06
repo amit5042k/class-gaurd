@@ -18,6 +18,7 @@ NAV_ITEMS = [
         ("attendance",      "□  Attendance"),
         ("expression",      "☻  Expression Monitor"),
         ("safety",          "⚠  Safety Watch"),
+        ("tracking",        "⌖  Person Tracking"),
     ]),
     ("SYSTEM", [
         ("recordings",      "●  Recordings"),

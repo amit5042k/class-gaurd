@@ -158,3 +158,14 @@ class AuditLog(Base):
     username   = Column(String(80))
     action     = Column(String(60))
     details    = Column(Text)
+
+
+class Sighting(Base):
+    """A recognised person seen on a camera (person tracking)."""
+    __tablename__ = "sightings"
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    person_id     = Column(Integer, ForeignKey("persons.id"), nullable=False, index=True)
+    camera_id     = Column(Integer, ForeignKey("cameras.id"), nullable=True)
+    seen_at       = Column(DateTime, default=datetime.now, index=True)
+    confidence    = Column(Float)
+    snapshot_path = Column(String(500))

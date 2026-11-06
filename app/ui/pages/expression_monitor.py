@@ -70,6 +70,20 @@ class ExpressionMonitor(QWidget):
         ll.setContentsMargins(0, 0, 0, 0)
         self._video = VideoCanvas("Select a camera and click Start Monitoring")
         ll.addWidget(self._video, 1)
+        mood = QHBoxLayout()
+        mood.addWidget(QLabel("Class mood:"))
+        self._mood_lbl = QLabel("—")
+        self._mood_lbl.setStyleSheet("font-weight:bold; font-size:14px;")
+        mood.addWidget(self._mood_lbl)
+        self._mood_bar = QProgressBar()
+        self._mood_bar.setRange(0, 100)
+        self._mood_bar.setFixedHeight(16)
+        self._mood_bar.setFormat("upset %p%")
+        mood.addWidget(self._mood_bar, 1)
+        self._mood_detail = QLabel()
+        self._mood_detail.setStyleSheet("color:#999;")
+        mood.addWidget(self._mood_detail)
+        ll.addLayout(mood)
         self._bars: Dict[str, QProgressBar] = {}
         for emo in EMOTIONS:
             row = QHBoxLayout()
@@ -152,6 +166,26 @@ class ExpressionMonitor(QWidget):
         total = sum(self._counter.values()) or 1
         for emo, bar in self._bars.items():
             bar.setValue(int(100 * self._counter.get(emo, 0) / total))
+
+    def on_mood(self, camera_id: int, summary: dict):
+        """Class mood over the last minute, from the AI worker."""
+        if camera_id != self._active:
+            return
+        from app.config import Config
+        from app.core.class_mood import LEVEL_COLORS
+        if not summary.get("enough"):
+            self._mood_lbl.setText("Gathering…")
+            self._mood_lbl.setStyleSheet("font-weight:bold; font-size:14px; color:#999;")
+        else:
+            color = LEVEL_COLORS.get(summary["level"], "#dde1ec")
+            self._mood_lbl.setText(summary["level"])
+            self._mood_lbl.setStyleSheet(f"font-weight:bold; font-size:14px; color:{color};")
+            self._mood_bar.setStyleSheet(f"QProgressBar::chunk{{background:{color};}}")
+        self._mood_bar.setValue(int(summary.get("negative_pct", 0)))
+        self._mood_detail.setText(
+            f"happy {summary.get('positive_pct', 0):.0f}% · {summary.get('samples', 0)} faces "
+            f"in {int(Config.CLASS_MOOD_WINDOW)} s · alarm at "
+            f"{float(Config.CLASS_MOOD_ALERT_PERCENT):.0f}%")
 
     def _add_log(self, emotion: str, confidence: float):
         if self._log.rowCount() >= 300:

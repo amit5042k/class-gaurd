@@ -216,3 +216,88 @@ def test_nvr_delete_with_cameras(db):
     mgr.import_nvr_channels(nvr.id)
     mgr.delete_nvr(nvr.id, delete_cameras=True)
     assert mgr.get_all_cameras() == [] and mgr.get_all_nvrs() == []
+
+
+# ------------------------------------------------- VMS-style main view
+def test_window_layouts_with_large_window():
+    from app.ui.widgets.camera_grid import window_positions
+    rows, cols, pos = window_positions(6)
+    assert (rows, cols, len(pos)) == (3, 3, 6) and pos[0] == (0, 0, 2, 2)
+    rows, cols, pos = window_positions(8)
+    assert (rows, cols, len(pos)) == (4, 4, 8) and pos[0] == (0, 0, 3, 3)
+    for n in (1, 4, 9, 16, 25, 36):
+        r, c, p = window_positions(n)
+        assert r * c == n and len(p) == n
+
+
+def test_open_drag_swap_close_and_views(qtbot, tmp_path, monkeypatch):
+    from app.config import Config
+    from app.core.stream_manager import StreamManager
+    from app.ui.pages.live_view import LiveView
+    monkeypatch.setattr(Config, "SETTINGS_PATH", str(tmp_path / "s.json"))
+    monkeypatch.setattr(Config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(Config, "LIVE_VIEWS", {})
+    lv = LiveView(None, StreamManager())
+    qtbot.addWidget(lv)
+    lv.load_cameras(_cams(9))
+    assert lv.tree.tree.topLevelItemCount() == 2          # groups A and B
+    lv.close_all_windows()
+    assert lv._grid.visible_ids() == [] and lv._page_lbl.text() == "Custom view"
+    lv.open_in_window(7)                                  # first empty window
+    lv.open_in_window(3)
+    assert lv._slots[:2] == [7, 3]
+    lv._on_drop(3, 9, -1)                                 # dropped from the device tree
+    lv._on_drop(0, 3, 1)                                  # window 2 dragged onto window 1
+    assert lv._slots == [3, 7, None, 9]
+    lv.close_window(7)
+    assert lv._slots == [3, None, None, 9]
+    lv.save_view("Gate")
+    lv._go_page(1)                                        # back to camera pages
+    assert lv._grid.visible_ids() == [1, 2, 3, 4]
+    assert lv.load_view("Gate") and lv._grid.visible_ids() == [3, 9]
+    assert "Gate" in Config.LIVE_VIEWS
+    lv.open_many([1, 2, 3, 4, 5])                         # a whole recorder
+    assert lv._grid.page_size == 9 and lv._grid.visible_ids() == [1, 2, 3, 4, 5]
+    lv.stop_all_streams()
+
+
+def test_auto_switch_cycles_pages(qtbot):
+    from app.core.stream_manager import StreamManager
+    from app.ui.pages.live_view import LiveView
+    lv = LiveView(None, StreamManager())
+    qtbot.addWidget(lv)
+    lv.load_cameras(_cams(6))
+    lv._btn_tour.setChecked(True)
+    lv._tour_step()
+    assert lv._grid.visible_ids() == [5, 6]
+    lv._tour_step()
+    assert lv._grid.visible_ids() == [1, 2, 3, 4]
+    lv._btn_tour.setChecked(False)
+
+
+def test_digital_zoom_and_event_list(qtbot):
+    from datetime import datetime
+    from PyQt6.QtGui import QImage
+    from app.core.stream_manager import StreamManager
+    from app.ui.pages.live_view import LiveView
+    lv = LiveView(None, StreamManager())
+    qtbot.addWidget(lv)
+    lv.load_cameras(_cams(2))
+    cell = lv._grid.get_cell(1)
+    img = QImage(640, 360, QImage.Format.Format_RGB888)
+    img.fill(0x336699)
+    cell.update_frame(1, img)
+    cell._b_zoom.setChecked(True)
+    cell._toggle_zoom()
+    cell.zoom_at(3)
+    assert cell.zoom > 1.9
+    cell.zoom_at(-10)
+    assert cell.zoom == 1.0
+    got = []
+    lv.playback_requested.connect(lambda cid, when: got.append((cid, when)))
+    lv.add_event({"camera_id": 2, "type": "Safety", "description": "Fall", "severity": "high",
+                  "time": datetime(2026, 1, 1, 9, 0)})
+    lv._on_event_double(lv._event_list.item(0))
+    assert got == [(2, datetime(2026, 1, 1, 9, 0))]
+    cell.playback_requested.emit(1)
+    assert got[-1][0] == 1

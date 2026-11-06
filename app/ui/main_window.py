@@ -23,6 +23,7 @@ from app.ui.pages.nvr_management import NVRManagement
 from app.ui.pages.recordings import RecordingsPage
 from app.ui.pages.safety_watch import SafetyWatch, load_all_zones
 from app.ui.pages.settings import SettingsPage
+from app.ui.pages.tracking import TrackingPage
 from app.ui.pages.users import UsersPage
 from app.core.security import ROLE_LABELS, PAGES, CurrentUser, Session, UserService, audit
 from app.ui.styles import DARK
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
             self.ai.request_model(dict(Config.SAFETY_MODEL))
         self.ai.start()
         self.recorder.start_cleanup()
+        QTimer.singleShot(5000, self._purge_sightings)
         self.apply_user(self.user)
         QTimer.singleShot(500, self._start_background_streams)
         if Config.AUTO_START_STREAMS:
@@ -92,6 +94,7 @@ class MainWindow(QMainWindow):
         self._p_attend = AttendancePage(self.db)
         self._p_expr = ExpressionMonitor(self.db)
         self._p_safety = SafetyWatch(self.db)
+        self._p_track = TrackingPage(self.db)
         self._p_alerts = AlertsPage(self.db)
         self._p_rec = RecordingsPage(self.db)
         self._p_settings = SettingsPage(self.db)
@@ -103,6 +106,7 @@ class MainWindow(QMainWindow):
             ("cameras", self._p_cameras), ("nvr", self._p_nvr),
             ("face_enrollment", self._p_faces), ("attendance", self._p_attend),
             ("expression", self._p_expr), ("safety", self._p_safety),
+            ("tracking", self._p_track),
             ("alerts", self._p_alerts), ("recordings", self._p_rec),
             ("settings", self._p_settings), ("users", self._p_users),
         ]:
@@ -149,10 +153,14 @@ class MainWindow(QMainWindow):
         self.ai.model_status.connect(self._p_safety.on_model_status)
         self.ai.attendance_event.connect(self._on_attendance_event)
         self.ai.alert_created.connect(self._on_alert)
+        self.ai.class_mood.connect(self._p_expr.on_mood)
+        self.ai.person_seen.connect(self._on_person_seen)
+        self._p_track.live_requested.connect(self._show_camera_live)
 
         self._bridge.rec_state.connect(self._p_live.set_recording_state)
         self._p_live.record_requested.connect(self._on_record_requested)
         self._p_live.fullscreen_requested.connect(self._toggle_fullscreen)
+        self._p_live.playback_requested.connect(self._play_alert_video)
         self._p_alerts.video_requested.connect(self._play_alert_video)
         self._sidebar.lock_requested.connect(self.lock)
         self._sidebar.password_requested.connect(self._change_password)
@@ -210,6 +218,7 @@ class MainWindow(QMainWindow):
         self._p_live.load_cameras(cameras)
         self._p_expr.set_cameras(cameras)
         self._p_safety.set_cameras(cameras)
+        self._p_track.set_cameras(cameras)
         self._p_rec.set_cameras(cameras)
         self.ai.set_cameras(cameras)
         self.recorder.set_cameras(cameras)
@@ -311,6 +320,7 @@ class MainWindow(QMainWindow):
 
     def _on_alert(self, alert: dict):
         severity = alert.get("severity", "medium")
+        self._p_live.add_event(alert)
         if severity in ("high", "medium"):
             self.toasts.show(alert.get("type", "Alert"), alert.get("description", ""),
                              severity, on_click=lambda: self._sidebar.set_active("alerts"))
@@ -319,6 +329,23 @@ class MainWindow(QMainWindow):
         if self._stack.currentWidget() is self._p_alerts:
             self._p_alerts.refresh()
         self._p_dashboard.refresh()
+
+    def _on_person_seen(self, seen: dict):
+        self._p_track.on_person_seen(seen)
+        if seen.get("person_id") == self._p_track.tracked_person_id() and \
+                self._stack.currentWidget() is not self._p_track:
+            self.toasts.show("Person tracking", f"{seen.get('name')} seen at "
+                             f"{seen.get('camera_name')}", "info",
+                             on_click=lambda: self._sidebar.set_active("tracking"))
+
+    def _show_camera_live(self, camera_id: int):
+        self._sidebar.set_active("live_view")
+        self._p_live.open_in_window(camera_id)
+
+    def _purge_sightings(self):
+        from app.core.tracking import purge_old_sightings
+        from app.ui.async_task import run_async
+        run_async(purge_old_sightings, lambda *_: None, self.db, receiver=self)
 
     def _restart(self):
         from app.ui.restart import restart_app

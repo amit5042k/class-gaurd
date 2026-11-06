@@ -22,9 +22,9 @@ ROLE_LABELS = {ROLE_ADMIN: "Administrator", ROLE_OPERATOR: "Operator", ROLE_VIEW
 PAGES = {
     ROLE_VIEWER: {"dashboard", "live_view", "attendance", "alerts", "recordings"},
     ROLE_OPERATOR: {"dashboard", "live_view", "attendance", "alerts", "recordings",
-                    "face_enrollment", "expression", "safety"},
+                    "face_enrollment", "expression", "safety", "tracking"},
     ROLE_ADMIN: {"dashboard", "live_view", "attendance", "alerts", "recordings",
-                 "face_enrollment", "expression", "safety", "cameras", "nvr",
+                 "face_enrollment", "expression", "safety", "tracking", "cameras", "nvr",
                  "settings", "users"},
 }
 MIN_PASSWORD_LENGTH = 8
