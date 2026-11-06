@@ -31,6 +31,33 @@ def keyframe_requester(cam: Dict):
     return request
 
 
+def snapshot_fetcher(cam: Dict):
+    """Callable returning a still picture (BGR array) from the device, or None.
+    Used when the NVR's video arrives without full pictures (grey tiles)."""
+    if cam.get("brand") != "Hikvision" or cam.get("custom_rtsp_url"):
+        return None
+    channel = int(cam.get("channel") or 1)
+    ids = [channel * 100 + (2 if cam.get("use_substream") else 1), channel * 100 + 1]
+    state = {"api": None}
+
+    def fetch():
+        import cv2
+        import numpy as np
+        from app.protocols.hikvision import HikvisionAPI
+        if state["api"] is None:
+            state["api"] = HikvisionAPI(cam["host"], cam.get("http_port") or 80,
+                                        cam.get("username", ""), cam.get("password", ""))
+        for sid in dict.fromkeys(ids):
+            data = state["api"].snapshot(sid)
+            if data:
+                img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    ids[:] = [sid]        # remember the stream that answers
+                    return img
+        return None
+    return fetch
+
+
 class LiveView(QWidget):
     active_count_changed = pyqtSignal(int)
     message = pyqtSignal(str)
@@ -246,7 +273,8 @@ class LiveView(QWidget):
         self.sm.start_stream(cam["id"], cam["rtsp_url"],
                              on_frame=self._grid.update_frame, on_status=self._on_status,
                              transport=cam.get("rtsp_transport") or "auto",
-                             keyframe_request=keyframe_requester(cam))
+                             keyframe_request=keyframe_requester(cam),
+                             snapshot=snapshot_fetcher(cam))
         self._emit_count()
         return True
 

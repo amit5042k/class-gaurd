@@ -36,6 +36,8 @@ class AVCapture:
         options = {}
         if url.startswith("rtsp"):
             options["rtsp_transport"] = transport
+            if transport == "udp":
+                options["buffer_size"] = str(4 * 1024 * 1024)   # keep whole keyframes
         try:
             self._container = av.open(url, options=options,
                                       timeout=(open_timeout_s, read_timeout_s))

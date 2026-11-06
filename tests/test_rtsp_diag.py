@@ -327,3 +327,65 @@ def test_hikvision_keyframe_request_paths():
     urls = [u for _, u, _ in api.session.calls]
     assert urls[0].endswith("/ISAPI/Streaming/channels/102/requestKeyFrame")
     assert urls[1].endswith("/ISAPI/ContentMgmt/StreamingProxy/channels/102/requestKeyFrame")
+
+
+def test_keyframe_detection_in_rtp_payloads():
+    from app.protocols.rtsp_diag import _is_keyframe, _nal_types, _rtp_payload
+    rtp = lambda payload: bytes([0x80, 96]) + b"\x00\x01" + b"\x00" * 8 + payload  # noqa: E731
+    # H.264: FU-A start of an IDR slice, FU-A middle part, STAP-A with SPS+PPS
+    assert _nal_types(_rtp_payload(rtp(b"\x7c\x85abc")), "H264") == [5]
+    assert _nal_types(_rtp_payload(rtp(b"\x7c\x05abc")), "H264") == []
+    stap = b"\x18" + b"\x00\x02\x67\x42" + b"\x00\x02\x68\xce"
+    assert _nal_types(_rtp_payload(rtp(stap)), "H264") == [7, 8]
+    assert _is_keyframe(5, "H264") and not _is_keyframe(1, "H264")
+    # H.265: FU start of an IDR_W_RADL (19) picture, and a plain P slice (1)
+    assert _nal_types(_rtp_payload(rtp(b"\x62\x01\x93xyz")), "H265") == [19]
+    assert _is_keyframe(19, "H265") and not _is_keyframe(1, "H265")
+
+
+def test_still_pictures_replace_endless_grey_video(qtbot, monkeypatch):
+    import numpy as np
+    from app.core import stream_manager as smod
+
+    class Grey:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            import time
+            time.sleep(0.01)
+            return True, _grey_with_clock()
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(smod, "_open_guarded", lambda *a, **k: Grey())
+    monkeypatch.setattr(smod.StreamThread, "_precheck", lambda self: ("", ""))
+    monkeypatch.setattr(smod, "GREY_WARN_S", 0.3)
+    still = np.full((360, 640, 3), (30, 90, 160), np.uint8)
+    statuses, shown = [], []
+    sm = smod.StreamManager()
+    sm.start_stream(1, "rtsp://cam/x", snapshot=lambda: still,
+                    on_status=lambda c, ok, m: statuses.append((ok, m)),
+                    on_frame=lambda c, img: shown.append(img.pixel(300, 200)))
+    try:
+        qtbot.waitUntil(lambda: bool(shown), timeout=10000)
+        from PyQt6.QtGui import QColor
+        assert QColor(shown[0]).red() == 160               # the still, not grey video
+        assert (True, smod.SNAPSHOT_MSG) in statuses
+    finally:
+        sm.stop_all(wait_ms=10000)
+
+
+def test_hikvision_snapshot_falls_back_to_proxy_path():
+    from app.protocols.hikvision import HikvisionAPI
+    from tests.test_live_and_playback import FakeResponse, FakeSession
+    jpeg = b"\xff\xd8\xff\xe0rest"
+    api = HikvisionAPI("10.0.5.1", 80, "admin", "pw")
+    api.session = FakeSession({"/ISAPI/Streaming/channels/102/picture": FakeResponse(403),
+                               "StreamingProxy/channels/102/picture":
+                                   FakeResponse(200, content=jpeg)})
+    assert api.snapshot(102) == jpeg
+    api.session.calls.clear()
+    assert api.snapshot(102) == jpeg                       # remembers the working path
+    assert "StreamingProxy" in api.session.calls[0][1]

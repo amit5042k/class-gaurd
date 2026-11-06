@@ -86,6 +86,25 @@ class HikvisionAPI:
                 return True
         return False
 
+    def snapshot(self, stream_id: int) -> Optional[bytes]:
+        """JPEG still from the device (stream_id e.g. 102), or None. Works even when
+        the RTSP video can't be decoded, since the NVR encodes the picture itself."""
+        paths = [f"/Streaming/channels/{stream_id}/picture",
+                 f"/ContentMgmt/StreamingProxy/channels/{stream_id}/picture"]
+        if getattr(self, "_snap_path", None) in paths:
+            paths.remove(self._snap_path)
+            paths.insert(0, self._snap_path)
+        for path in paths:
+            try:
+                r = self.session.get(f"{self.base}{path}", timeout=TIMEOUT)
+            except requests.RequestException as e:
+                logger.info("Snapshot %s: %s", path, e)
+                return None
+            if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+                self._snap_path = path
+                return r.content
+        return None
+
     def ptz_goto_preset(self, channel: int, preset: int) -> bool:
         r = self.session.put(f"{self.base}/PTZCtrl/channels/{channel}/presets/{preset}/goto",
                              timeout=TIMEOUT)

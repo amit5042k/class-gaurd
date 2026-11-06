@@ -260,11 +260,69 @@ def _video_control(sdp: str, base: str) -> str:
     return base.rstrip("/") + "/" + control
 
 
+def _video_codec(sdp: str) -> str:
+    in_video = False
+    for line in sdp.splitlines():
+        if line.startswith("m="):
+            in_video = line.startswith("m=video")
+        elif in_video and line.startswith("a=rtpmap:"):
+            return line.split(" ", 1)[1].split("/")[0].strip().upper()
+    return ""
+
+
+def _nal_types(payload: bytes, codec: str) -> list:
+    """NAL unit types that start in this RTP payload (H.264 / H.265)."""
+    if not payload:
+        return []
+    if codec in ("H265", "HEVC"):
+        if len(payload) < 3:
+            return []
+        t = (payload[0] >> 1) & 0x3F
+        if t == 49:                                   # fragmentation unit
+            return [payload[2] & 0x3F] if payload[2] & 0x80 else []
+        if t == 48:                                   # aggregation packet
+            out, i = [], 2
+            while i + 3 <= len(payload):
+                n = int.from_bytes(payload[i:i + 2], "big")
+                out.append((payload[i + 2] >> 1) & 0x3F)
+                i += 2 + n
+            return out
+        return [t]
+    t = payload[0] & 0x1F
+    if t == 28:                                       # FU-A
+        return [payload[1] & 0x1F] if len(payload) > 1 and payload[1] & 0x80 else []
+    if t == 24:                                       # STAP-A
+        out, i = [], 1
+        while i + 3 <= len(payload):
+            n = int.from_bytes(payload[i:i + 2], "big")
+            out.append(payload[i + 2] & 0x1F)
+            i += 2 + n
+        return out
+    return [t]
+
+
+def _is_keyframe(nal: int, codec: str) -> bool:
+    return 16 <= nal <= 21 if codec in ("H265", "HEVC") else nal == 5
+
+
+def _rtp_payload(packet: bytes) -> bytes:
+    if len(packet) < 12 or packet[0] >> 6 != 2:
+        return b""
+    i = 12 + 4 * (packet[0] & 0x0F)
+    if packet[0] & 0x10 and len(packet) >= i + 4:     # header extension
+        i += 4 + 4 * int.from_bytes(packet[i + 2:i + 4], "big")
+    end = len(packet)
+    if packet[0] & 0x20 and end > i:                  # padding
+        end -= packet[-1]
+    return packet[i:end] if end > i else b""
+
+
 def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
     """Request the stream over RTSP/TCP and count the video packets that arrive,
     without decoding. Tells "the device sends nothing" apart from "the decoder
     can't decode what it sends"."""
-    res = {"packets": 0, "bytes": 0, "first_s": None, "error": ""}
+    res = {"packets": 0, "bytes": 0, "first_s": None, "error": "", "codec": "",
+           "keyframes": [], "param_sets": False}
     try:
         c = _Client(url, timeout)
     except OSError as e:
@@ -277,6 +335,7 @@ def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
             return res
         base = (h.get("content-base") or h.get("content-location") or [c.url])[0]
         control = _video_control(h["_body"], base)
+        codec = res["codec"] = _video_codec(h["_body"])
         code, h = c.request("SETUP", control,
                             ["Transport: RTP/AVP/TCP;unicast;interleaved=0-1"])
         if code != 200:
@@ -288,6 +347,7 @@ def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
             res["error"] = f"PLAY answered {code}"
             return res
         t0 = time.monotonic()
+        kf_stamp = None
         while time.monotonic() - t0 < seconds:
             while len(c.buf) >= 4 and c.buf[:1] == b"$":
                 n = int.from_bytes(c.buf[2:4], "big")
@@ -298,6 +358,14 @@ def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
                     res["bytes"] += n
                     if res["first_s"] is None:
                         res["first_s"] = time.monotonic() - t0
+                    pkt = c.buf[4:4 + n]
+                    for nal in _nal_types(_rtp_payload(pkt), codec):
+                        if _is_keyframe(nal, codec):
+                            if pkt[4:8] != kf_stamp:     # one picture, many slices
+                                kf_stamp = pkt[4:8]
+                                res["keyframes"].append(round(time.monotonic() - t0, 1))
+                        elif nal in ((7, 8) if codec not in ("H265", "HEVC") else (32, 33, 34)):
+                            res["param_sets"] = True
                 c.buf = c.buf[4 + n:]
             if c.buf and c.buf[:1] != b"$":
                 if b"\r\n\r\n" in c.buf:      # e.g. an RTSP message from the device

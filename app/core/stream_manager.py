@@ -24,12 +24,19 @@ logger = logging.getLogger(__name__)
 OPEN_TIMEOUT_MS = 10_000
 READ_TIMEOUT_MS = 10_000
 DISPLAY_MAX_WIDTH = 1280
+UDP_BUFFER = 4 * 1024 * 1024
 DISPLAY_FPS = 15  # screen refresh cap; recording and AI still get every frame
 CONNECTING = "Connecting…"
 WAITING_KEYFRAME = ("Connected. Waiting for a full picture from the camera (keyframe)…")
 NO_KEYFRAME_MSG = ("Connected, but the camera hasn't sent a full picture yet. On the NVR/camera, "
                    "turn off H.264+ / H.265+ / Smart Codec and set the I-frame interval "
                    "to 25–50 for this stream.")
+SNAPSHOT_MSG = ("Still pictures (about 1 per second): the NVR's video arrives without full "
+                "pictures. For live video turn off H.264+ / Smart Codec on the NVR and set "
+                "the I-frame interval to 25–50.")
+SNAPSHOT_SECONDS = 600     # then try live video again
+GREY_WARN_S = 20           # grey this long: warn / switch to still pictures
+GREY_SHOW_S = 30           # grey this long: show the grey pictures anyway
 SILENT_MSG = ("The device accepts the connection but sends no video data. Is the camera "
               "on this channel online? Security software on this PC can also block it.")
 
@@ -119,7 +126,10 @@ def open_capture(source: str, transport: str = "tcp", backend: str = "opencv"):
     params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
               cv2.CAP_PROP_READ_TIMEOUT_MSEC, READ_TIMEOUT_MS]
     udp = transport == "udp" and source.startswith("rtsp")
-    return _open_guarded(source, params, "rtsp_transport;udp" if udp else _DEFAULT_OPTIONS)
+    # A big receive buffer stops UDP from dropping parts of the large keyframes,
+    # which otherwise leaves only grey pictures.
+    return _open_guarded(source, params,
+                         f"rtsp_transport;udp|buffer_size;{UDP_BUFFER}" if udp else _DEFAULT_OPTIONS)
 
 
 def is_placeholder_frame(frame: np.ndarray) -> bool:
@@ -155,7 +165,8 @@ class StreamThread(QThread):
     def __init__(self, camera_id: int, rtsp_url: str,
                  listeners: List[Callable], reconnect_delay: float = 2,
                  transport: str = "auto", first: str = "tcp", backend: str = "opencv",
-                 keyframe_request: Optional[Callable] = None):
+                 keyframe_request: Optional[Callable] = None,
+                 snapshot: Optional[Callable] = None):
         super().__init__()
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
@@ -168,6 +179,9 @@ class StreamThread(QThread):
             (self.transport == "auto" and first == "udp") else "tcp"
         self._backend = backend if backend in ("opencv", "pyav") else "opencv"
         self._keyframe_request = keyframe_request
+        self._snapshot = snapshot
+        self._snapshot_ok = snapshot is not None
+        self._last_display = 0.0
 
     def _next_attempt(self) -> str:
         """After "connected but no picture": try the other decoder first (some
@@ -191,7 +205,6 @@ class StreamThread(QThread):
     def run(self):
         self._running = True
         delay = self._base_delay
-        last_display = 0.0
         failures = 0
         reason = ""
         last_kind = ""
@@ -200,6 +213,7 @@ class StreamThread(QThread):
         while self._running:
             cap = None
             got_frame = False
+            go_snapshot = False
             try:
                 # Ask the device first: it answers in well under a second, while a
                 # failed OpenCV open always waits the full timeout on Windows.
@@ -256,14 +270,17 @@ class StreamThread(QThread):
                                     waiting_since = now
                                     self.status_changed.emit(self.camera_id, False,
                                                              WAITING_KEYFRAME)
-                                elif not warned and now - waiting_since > 20:
+                                elif not warned and now - waiting_since > GREY_WARN_S:
                                     warned = True
+                                    if self._snapshot_ok:
+                                        go_snapshot = True   # stills beat a grey tile
+                                        break
                                     self.status_changed.emit(self.camera_id, False,
                                                              NO_KEYFRAME_MSG)
                                 if now - last_kf_request > 8:
                                     last_kf_request = now
                                     self._request_keyframe()
-                                if now - waiting_since < 30:
+                                if now - waiting_since < GREY_SHOW_S:
                                     continue
                                 # A real flat grey scene, or no keyframes at all:
                                 # show what we have rather than nothing.
@@ -279,18 +296,8 @@ class StreamThread(QThread):
                                 if self.transport == "auto":
                                     self.transport_learned.emit(self.camera_id, self._current)
                                 self.backend_learned.emit(self.camera_id, self._backend)
-                        self.last_frame = frame
-                        for listener in list(self._listeners):
-                            try:
-                                listener(self.camera_id, frame)
-                            except Exception:
-                                logger.exception("Frame listener failed")
-                        now = time.monotonic()
-                        if now - last_display >= 1 / DISPLAY_FPS:
-                            last_display = now
-                            self.frame_ready.emit(
-                                self.camera_id, to_qimage(frame, DISPLAY_MAX_WIDTH))
-                    if self._running:
+                        self._deliver(frame)
+                    if self._running and not go_snapshot:
                         if got_frame:
                             self.status_changed.emit(self.camera_id, False, "Stream lost")
                         else:
@@ -308,6 +315,8 @@ class StreamThread(QThread):
                             logger.warning("Camera %s: opened over %s but no frames",
                                            self.camera_id, tried)
                             delay = self._base_delay  # retry the next combination promptly
+                            if failures >= 2 and self._snapshot_ok:
+                                go_snapshot = True
             except _Retry:
                 pass
             except Exception as e:
@@ -317,9 +326,59 @@ class StreamThread(QThread):
                 if cap is not None:
                     cap.release()
 
+            if go_snapshot and self._running:
+                if self._snapshot_mode():
+                    failures, delay = 0, self._base_delay
+                    continue
             if self._running:
                 self._sleep(delay)
                 delay = min(delay * 2, 30)
+
+    def _deliver(self, frame, force_display: bool = False):
+        self.last_frame = frame
+        for listener in list(self._listeners):
+            try:
+                listener(self.camera_id, frame)
+            except Exception:
+                logger.exception("Frame listener failed")
+        now = time.monotonic()
+        if force_display or now - self._last_display >= 1 / DISPLAY_FPS:
+            self._last_display = now
+            self.frame_ready.emit(self.camera_id, to_qimage(frame, DISPLAY_MAX_WIDTH))
+
+    def _grab_snapshot(self):
+        try:
+            img = self._snapshot()
+            return img if img is not None and getattr(img, "size", 0) else None
+        except Exception as e:
+            logger.info("Snapshot failed for camera %s: %s", self.camera_id, e)
+            return None
+
+    def _snapshot_mode(self) -> bool:
+        """Show the device's still pictures instead of undecodable video for a
+        while. False if the device gives no stills (then never try again)."""
+        img = self._grab_snapshot()
+        if img is None:
+            self._snapshot_ok = False
+            return False
+        logger.warning("Camera %s: video has no full pictures; showing still pictures",
+                       self.camera_id)
+        self.status_changed.emit(self.camera_id, True, SNAPSHOT_MSG)
+        end = time.monotonic() + SNAPSHOT_SECONDS
+        misses = 0
+        while self._running and time.monotonic() < end:
+            if img is not None:
+                misses = 0
+                self._deliver(img, force_display=True)
+            else:
+                misses += 1
+                if misses >= 5:
+                    self.status_changed.emit(self.camera_id, False, "Stream lost")
+                    break
+            self._sleep(1.0)
+            if self._running:
+                img = self._grab_snapshot()
+        return True
 
     def _request_keyframe(self):
         if self._keyframe_request is None:
@@ -397,13 +456,14 @@ class StreamManager:
 
     def start_stream(self, camera_id: int, rtsp_url: str,
                      on_frame=None, on_status=None, transport: str = "auto",
-                     on_transport=None, keyframe_request=None) -> StreamThread:
+                     on_transport=None, keyframe_request=None,
+                     snapshot=None) -> StreamThread:
         self.stop_stream(camera_id)
         thread = StreamThread(camera_id, rtsp_url, self.frame_listeners,
                               self.reconnect_delay, transport,
                               self.learned_transport.get(camera_id, "tcp"),
                               self.learned_backend.get(camera_id, "opencv"),
-                              keyframe_request)
+                              keyframe_request, snapshot)
         thread.transport_learned.connect(
             lambda cid, t: self.learned_transport.__setitem__(cid, t))
         thread.backend_learned.connect(

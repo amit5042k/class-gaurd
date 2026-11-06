@@ -95,11 +95,11 @@ def mask(text: str, password: str) -> str:
 
 def _try_stream(url: str, transport: str, seconds: float = 6.0,
                 backend: str = "opencv") -> Dict:
-    from app.core.stream_manager import open_capture
+    from app.core.stream_manager import is_placeholder_frame, open_capture
     t0 = time.monotonic()
     cap = open_capture(url, transport, backend)
     out = {"opened": cap.isOpened(), "open_s": time.monotonic() - t0, "frames": 0,
-           "size": None, "first_frame_s": None, "read_errors": 0}
+           "size": None, "first_frame_s": None, "read_errors": 0, "full": 0}
     try:
         end = time.monotonic() + seconds
         while out["opened"] and time.monotonic() < end:
@@ -113,8 +113,34 @@ def _try_stream(url: str, transport: str, seconds: float = 6.0,
                 out["first_frame_s"] = time.monotonic() - t0
                 out["size"] = f"{frame.shape[1]}x{frame.shape[0]}"
             out["frames"] += 1
+            if out["full"] or not is_placeholder_frame(frame):
+                out["full"] += 1
     finally:
         cap.release()
+    return out
+
+
+PROBE_SECONDS = 10
+
+
+def _hikvision_checks(cam: Dict) -> list:
+    """Keyframe request and still-picture test over ISAPI (HTTP)."""
+    if cam.get("brand") != "Hikvision" or not cam.get("host") or cam.get("custom_rtsp_url"):
+        return []
+    from app.protocols.hikvision import HikvisionAPI
+    channel = int(cam.get("channel") or 1)
+    sid = channel * 100 + (2 if cam.get("use_substream") else 1)
+    port = cam.get("http_port") or 80
+    api = HikvisionAPI(cam["host"], port, cam.get("username", ""), cam.get("password", ""))
+    out = []
+    try:
+        ok = api.request_keyframe(sid)
+        out.append(f"   Keyframe request (HTTP port {port}): "
+                   f"{'accepted' if ok else 'refused or not supported'}")
+        img = api.snapshot(sid) or api.snapshot(channel * 100 + 1)
+        out.append(f"   Still picture (HTTP): {'OK, ' + str(len(img) // 1024) + ' KB' if img else 'not available'}")
+    except Exception as e:
+        out.append(f"   HTTP (ISAPI) check failed: {e}")
     return out
 
 
@@ -151,16 +177,26 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
     if conclusion is None and url.startswith("rtsp"):
         from app.protocols.rtsp_diag import media_probe
         time.sleep(1)
-        probe = media_probe(url, seconds=5)
+        probe = media_probe(url, seconds=PROBE_SECONDS)
         if probe["error"]:
             lines.append(f"3. Video data (no decoder, TCP): failed: {probe['error']}")
         elif probe["packets"]:
             lines.append(f"3. Video data (no decoder, TCP): {probe['packets']} packets, "
-                         f"{probe['bytes'] // 1024} KB in 5 s, first after "
+                         f"{probe['bytes'] // 1024} KB in {PROBE_SECONDS} s, first after "
                          f"{probe['first_s']:.1f} s")
+            kf = probe["keyframes"]
+            if kf:
+                every = (f", about every {(kf[-1] - kf[0]) / (len(kf) - 1):.1f} s"
+                         if len(kf) > 1 else "")
+                lines.append(f"   Full pictures (keyframes): {len(kf)} in {PROBE_SECONDS} s, "
+                             f"first after {kf[0]:.1f} s{every}")
+            elif probe["codec"] in ("H264", "H265", "HEVC"):
+                lines.append(f"   Full pictures (keyframes): NONE in {PROBE_SECONDS} s "
+                             f"({probe['codec']}). Without them pictures stay grey")
         else:
-            lines.append("3. Video data (no decoder, TCP): NONE. The device accepted the "
-                         "request but sent no video in 5 s")
+            lines.append(f"3. Video data (no decoder, TCP): NONE. The device accepted the "
+                         f"request but sent no video in {PROBE_SECONDS} s")
+        lines += _hikvision_checks(cam)
 
     if conclusion is None:
         from app.core.av_capture import AVAILABLE as pyav_ok
@@ -173,7 +209,10 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
             offset = _native_offset()
             r = _try_stream(url, transport, stream_seconds, backend)
             results[(transport, backend)] = r
-            if r["frames"]:
+            if r["frames"] and not r["full"]:
+                summary = (f"{r['frames']} frames, {r['size']}, but ALL GREY (no full picture "
+                           f"in {stream_seconds:.0f} s)")
+            elif r["frames"]:
                 summary = (f"{r['frames']} frames, {r['size']}, first picture after "
                            f"{r['first_frame_s']:.1f} s")
             elif r["opened"]:
@@ -184,9 +223,10 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
             lines.append(f"{step}. Video over {transport.upper()}, {decoder}: {summary}")
             for msg in _native_since(offset):
                 lines.append(f"     video library: {mask(msg, pwd)}")
-            if r["frames"]:
+            if r["full"]:
                 break  # found a working combination
-        working = [k for k, r in results.items() if r["frames"]]
+        working = [k for k, r in results.items() if r["full"]]
+        grey = any(r["frames"] for r in results.values())
         if working:
             transport, backend = working[0]
             if (transport, backend) == ("tcp", "opencv"):
@@ -198,6 +238,14 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
             else:
                 conclusion = ("Video works only over UDP. Leave RTSP transport on Auto, or set "
                               "it to UDP for this camera.")
+        elif grey or (probe and probe["packets"] and not probe["keyframes"]
+                      and probe["codec"] in ("H264", "H265", "HEVC")):
+            conclusion = ("Video arrives, but without full pictures (keyframes), so it shows "
+                          "grey. On the NVR (Configuration > Video/Audio, this camera, Sub "
+                          "Stream) turn H.264+ / H.265+ / Smart Codec OFF, set I-Frame "
+                          "Interval to 25-50, and save. Check the same on the camera itself if "
+                          "the NVR passes its stream through. Meanwhile ClassGuard shows still "
+                          "pictures for Hikvision devices.")
         elif probe and not probe["error"] and probe["packets"] == 0:
             conclusion = ("The NVR accepts the request but sends NO video data, so this is not "
                           "a decoding problem. Most likely: (1) the camera on this NVR channel "
