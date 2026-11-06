@@ -86,6 +86,9 @@ class VideoCell(QWidget):
         tl.addWidget(self._status_dot)
         tl.addWidget(self._name_lbl)
         tl.addStretch()
+        self._mode_lbl = QLabel()
+        self._mode_lbl.setVisible(False)
+        tl.addWidget(self._mode_lbl)
         tl.addWidget(self._zoom_lbl)
         tl.addWidget(self._rec_lbl)
         root.addWidget(top)
@@ -168,8 +171,13 @@ class VideoCell(QWidget):
             self._status_dot.setObjectName("connected_dot")
             self._status_dot.setStyleSheet("color:#27ae60; font-size:14px;")
             self._canvas.setStyleSheet("")
-            if msg and msg.startswith("Still pictures"):
-                self.setToolTip(msg)
+            # Show when the picture is not normal live video.
+            if msg.startswith("Still pictures"):
+                self._badge("STILL", "#7fb3ff", msg)
+            elif msg and not msg.startswith("Connected"):
+                self._badge("⚠ NO FULL PICTURE", "#f39c12", msg)
+            else:
+                self._badge("", "", msg)
         else:
             self._last_img = None
             self._status_dot.setObjectName("disconnected_dot")
@@ -179,6 +187,12 @@ class VideoCell(QWidget):
             self._status_dot.setStyleSheet(
                 f"color:{'#f39c12' if connecting else '#ef4565'}; font-size:14px;")
             self._canvas.setStyleSheet("color:#555; font-size:12px;")
+
+    def _badge(self, text: str, color: str, tip: str):
+        self._mode_lbl.setText(text)
+        self._mode_lbl.setStyleSheet(f"color:{color}; font-size:10px; font-weight:bold;")
+        self._mode_lbl.setVisible(bool(text))
+        self.setToolTip(tip if text else "")
 
     def set_recording(self, recording: bool, manual: bool = False):
         self._recording = recording

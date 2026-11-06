@@ -389,3 +389,60 @@ def test_hikvision_snapshot_falls_back_to_proxy_path():
     api.session.calls.clear()
     assert api.snapshot(102) == jpeg                       # remembers the working path
     assert "StreamingProxy" in api.session.calls[0][1]
+
+
+def test_direct_decoder_reads_h264_and_h265(tmp_path):
+    import shutil
+    import subprocess
+    import time
+    import cv2
+    import numpy as np
+    import pytest
+    from app.core.rtp_capture import AVAILABLE, RTPCapture
+    from app.protocols.rtsp_diag import media_probe
+    if not AVAILABLE or not shutil.which("/usr/bin/python3.12"):
+        pytest.skip("needs PyAV and the GStreamer test server")
+    img = str(tmp_path / "p.png")
+    cv2.imwrite(img, np.random.default_rng(0).integers(0, 255, (240, 320, 3), dtype=np.uint8))
+    for codec in ("h264", "h265"):
+        port = _free_port()
+        srv = subprocess.Popen(["/usr/bin/python3.12", "tests/rtsp_test_server.py", str(port),
+                                img, codec, "20"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            url = f"rtsp://127.0.0.1:{port}/live"
+            deadline = time.time() + 15
+            probe = media_probe(url, seconds=3, save_path=str(tmp_path / f"{codec}.264"))
+            while probe["error"] and time.time() < deadline:
+                time.sleep(0.5)
+                probe = media_probe(url, seconds=3, save_path=str(tmp_path / f"{codec}.264"))
+            assert probe["keyframes"] and probe["pictures"] > 10 and probe["lost"] == 0
+            assert (tmp_path / f"{codec}.264").stat().st_size > 1000
+            time.sleep(1)
+            cap = RTPCapture(url)
+            try:
+                assert cap.isOpened(), cap.error
+                frames = [cap.read() for _ in range(10)]
+                assert all(ok for ok, _ in frames)
+                assert frames[0][1].shape == (240, 320, 3)
+            finally:
+                cap.release()
+        finally:
+            srv.terminate()
+            srv.wait()
+
+
+def test_depacketizer_rebuilds_fragmented_picture():
+    from app.core.rtp_capture import START, Depacketizer
+
+    def rtp(seq, payload, ts=1000, marker=False):
+        return (bytes([0x80, 0xE0 if marker else 0x60]) + seq.to_bytes(2, "big")
+                + ts.to_bytes(4, "big") + b"\x00" * 4 + payload)
+    d = Depacketizer("H264")
+    assert d.push(rtp(1, b"\x18" + b"\x00\x02\x67\x42" + b"\x00\x02\x68\xce")) == []
+    assert d.push(rtp(2, b"\x7c\x85" + b"AAAA")) == []          # FU-A start, IDR
+    out = d.push(rtp(3, b"\x7c\x45" + b"BBBB", marker=True))    # FU-A end
+    assert out == [(START + b"\x67\x42" + START + b"\x68\xce" + START + b"\x65AAAABBBB", True)]
+    d.push(rtp(4, b"\x7c\x81" + b"CC", ts=2000))
+    out = d.push(rtp(6, b"\x7c\x41" + b"DD", ts=2000, marker=True))   # seq 5 lost
+    assert out == []                                            # damaged picture dropped

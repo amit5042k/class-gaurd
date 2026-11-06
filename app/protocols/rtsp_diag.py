@@ -317,12 +317,14 @@ def _rtp_payload(packet: bytes) -> bytes:
     return packet[i:end] if end > i else b""
 
 
-def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
+def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0,
+                save_path: str = None) -> dict:
     """Request the stream over RTSP/TCP and count the video packets that arrive,
     without decoding. Tells "the device sends nothing" apart from "the decoder
     can't decode what it sends"."""
     res = {"packets": 0, "bytes": 0, "first_s": None, "error": "", "codec": "",
-           "keyframes": [], "param_sets": False}
+           "keyframes": [], "param_sets": False, "sdp_params": False, "pictures": 0,
+           "lost": 0}
     try:
         c = _Client(url, timeout)
     except OSError as e:
@@ -333,9 +335,17 @@ def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
         if code != 200:
             res["error"] = f"DESCRIBE answered {code}"
             return res
+        h_describe_body = h["_body"]
         base = (h.get("content-base") or h.get("content-location") or [c.url])[0]
         control = _video_control(h["_body"], base)
         codec = res["codec"] = _video_codec(h["_body"])
+        res["sdp_params"] = "sprop-" in h["_body"].lower()
+        depack = None
+        if codec in ("H264", "H265", "HEVC"):
+            from app.core.rtp_capture import Depacketizer
+            depack = Depacketizer(codec)
+        sample = bytearray()
+        last_seq = None
         code, h = c.request("SETUP", control,
                             ["Transport: RTP/AVP/TCP;unicast;interleaved=0-1"])
         if code != 200:
@@ -359,6 +369,16 @@ def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
                     if res["first_s"] is None:
                         res["first_s"] = time.monotonic() - t0
                     pkt = c.buf[4:4 + n]
+                    if len(pkt) >= 4:
+                        seq = int.from_bytes(pkt[2:4], "big")
+                        if last_seq is not None and seq != (last_seq + 1) & 0xFFFF:
+                            res["lost"] += (seq - last_seq - 1) & 0xFFFF
+                        last_seq = seq
+                    if depack is not None:
+                        for au, _key in depack.push(pkt):
+                            res["pictures"] += 1
+                            if save_path and len(sample) < 8_000_000:
+                                sample += au
                     for nal in _nal_types(_rtp_payload(pkt), codec):
                         if _is_keyframe(nal, codec):
                             if pkt[4:8] != kf_stamp:     # one picture, many slices
@@ -385,8 +405,22 @@ def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
             c.request("TEARDOWN", base, [f"Session: {session}"])
         except Exception:
             pass
+        if save_path and sample:
+            try:
+                import os
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                with open(save_path, "wb") as f:
+                    f.write(sdp_param_prefix(h_describe_body, codec) + bytes(sample))
+            except OSError:
+                pass
     except Exception as e:
         res["error"] = str(e)
     finally:
         c.close()
     return res
+
+
+def sdp_param_prefix(sdp: str, codec: str) -> bytes:
+    """Annex-B parameter sets from the SDP, to make a saved sample playable."""
+    from app.core.rtp_capture import START, _sprop
+    return b"".join(START + p for p in _sprop(sdp, codec))

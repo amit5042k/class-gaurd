@@ -1,6 +1,7 @@
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSpacerItem, QSizePolicy, QFrame
+    QPushButton, QSpacerItem, QSizePolicy, QFrame, QScrollArea
 )
 from PyQt6.QtCore import pyqtSignal
 
@@ -64,6 +65,20 @@ class Sidebar(QWidget):
         sep.setStyleSheet("color: #252550;")
         layout.addWidget(sep)
 
+        # The menu scrolls when the window is too short for all of it.
+        nav = QWidget()
+        nav.setObjectName("sidebar")
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{background:transparent;}")
+        scroll.setWidget(nav)
+        layout.addWidget(scroll, 1)
+        outer, layout = layout, nav_layout
         for section_title, items in NAV_ITEMS:
             lbl = QLabel(section_title)
             lbl.setObjectName("nav_section_label")
@@ -82,6 +97,7 @@ class Sidebar(QWidget):
             QSpacerItem(0, 0, QSizePolicy.Policy.Minimum,
                         QSizePolicy.Policy.Expanding)
         )
+        layout = outer
 
         badge_row = QHBoxLayout()
         badge_row.setContentsMargins(16, 8, 16, 16)

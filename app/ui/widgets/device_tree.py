@@ -49,6 +49,8 @@ class DeviceTree(QWidget):
         lay.addWidget(self.search)
         self.tree = _Tree()
         self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(14)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.tree.setDragEnabled(True)
         self.tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.tree.itemDoubleClicked.connect(self._on_double)
@@ -78,9 +80,15 @@ class DeviceTree(QWidget):
                 parent = QTreeWidgetItem(self.tree, [key])
                 parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
                 parents[key] = parent
-            item = QTreeWidgetItem(parent, [cam["name"]])
+            label = cam["name"]
+            for sep in (" - ", " – ", ": "):
+                if label.startswith(key + sep) and len(label) > len(key + sep):
+                    label = label[len(key + sep):]      # "NVR1 - Channel 5" -> "Channel 5"
+                    break
+            item = QTreeWidgetItem(parent, [label])
             item.setData(0, ROLE_CAMERA, cam["id"])
-            item.setToolTip(0, f"{cam.get('brand', '')} {cam.get('host', '')}".strip())
+            item.setToolTip(0, " · ".join(x for x in (cam["name"], cam.get("brand", ""),
+                                                      cam.get("host", "")) if x))
             self._items[cam["id"]] = item
             self._paint(cam["id"])
         for key, parent in parents.items():

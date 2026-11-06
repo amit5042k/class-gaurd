@@ -167,10 +167,10 @@ class LiveView(QWidget):
         bar = QWidget()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(0, 0, 0, 0)
-        bl.addWidget(QLabel("Windows:"))
         self._layout_cb = QComboBox()
+        self._layout_cb.setToolTip("Number of windows")
         for n in WINDOW_COUNTS:
-            self._layout_cb.addItem(f"{n} window" + ("s" if n > 1 else ""), n)
+            self._layout_cb.addItem(f"▦ {n}", n)
         self._layout_cb.setCurrentIndex(WINDOW_COUNTS.index(4))
         self._layout_cb.currentIndexChanged.connect(self._on_layout_change)
         bl.addWidget(self._layout_cb)
@@ -191,29 +191,42 @@ class LiveView(QWidget):
         self._btn_views.setMenu(self._views_menu)
         bl.addWidget(self._btn_views)
 
-        self._btn_tour = QPushButton("Auto-switch")
+        self._btn_tour = QPushButton("Auto")
         self._btn_tour.setCheckable(True)
         self._btn_tour.setToolTip("Cycle through the pages of cameras automatically")
         self._btn_tour.toggled.connect(self._toggle_tour)
         self._tour_cb = QComboBox()
+        self._tour_cb.setToolTip("Auto-switch interval")
         for sec in (10, 20, 30, 60, 120):
-            self._tour_cb.addItem(f"every {sec} s", sec)
+            self._tour_cb.addItem(f"{sec} s", sec)
         self._tour_cb.setCurrentIndex(1)
         self._tour_cb.currentIndexChanged.connect(
             lambda _i: self._tour.isActive() and self._tour.start(self._tour_cb.currentData() * 1000))
         bl.addWidget(self._btn_tour)
         bl.addWidget(self._tour_cb)
         bl.addStretch()
-        self._btn_capture = QPushButton("Capture all")
+        self._btn_capture = QPushButton("Capture")
         self._btn_capture.setToolTip("Save a snapshot of every window")
         self._btn_capture.clicked.connect(self.capture_all)
-        self._btn_clear = QPushButton("Close all windows")
+        self._btn_clear = QPushButton("Clear")
+        self._btn_clear.setToolTip("Close all windows")
         self._btn_clear.clicked.connect(self.close_all_windows)
         self._btn_full = QPushButton("Full screen")
         self._btn_full.setObjectName("secondary_btn")
         self._btn_full.clicked.connect(self.fullscreen_requested)
         for w in (self._btn_capture, self._btn_clear, self._btn_full):
             bl.addWidget(w)
+        # The app style adds padding Qt's size hints don't know about: reserve room
+        # so labels are never cut off.
+        for w in bar.findChildren((QPushButton, QToolButton, QComboBox, QLabel)):
+            text = w.currentText() if isinstance(w, QComboBox) else w.text()
+            if isinstance(w, QComboBox):
+                text = max((w.itemText(i) for i in range(w.count())), key=len, default=text)
+            extra = 14 if isinstance(w, QLabel) else 42
+            w.setMinimumWidth(w.fontMetrics().horizontalAdvance(text) + extra)
+        self._page_lbl.setMinimumWidth(
+            self._page_lbl.fontMetrics().horizontalAdvance("Custom view") + 14)
+        bl.setSpacing(4)
         return bar
 
     def _build_events(self) -> QWidget:

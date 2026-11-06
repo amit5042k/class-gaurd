@@ -121,6 +121,14 @@ def _try_stream(url: str, transport: str, seconds: float = 6.0,
 
 
 PROBE_SECONDS = 10
+MIN_GOOD_FRAMES = 3
+
+
+def sample_path(cam: Dict) -> str:
+    """Where Diagnose saves a few seconds of the raw video for support."""
+    import re
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(cam.get("name") or "camera")).strip("_")
+    return os.path.join(Config.LOGS_DIR, f"video-sample-{name}.264")
 
 
 def _hikvision_checks(cam: Dict) -> list:
@@ -177,7 +185,7 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
     if conclusion is None and url.startswith("rtsp"):
         from app.protocols.rtsp_diag import media_probe
         time.sleep(1)
-        probe = media_probe(url, seconds=PROBE_SECONDS)
+        probe = media_probe(url, seconds=PROBE_SECONDS, save_path=sample_path(cam))
         if probe["error"]:
             lines.append(f"3. Video data (no decoder, TCP): failed: {probe['error']}")
         elif probe["packets"]:
@@ -193,6 +201,12 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
             elif probe["codec"] in ("H264", "H265", "HEVC"):
                 lines.append(f"   Full pictures (keyframes): NONE in {PROBE_SECONDS} s "
                              f"({probe['codec']}). Without them pictures stay grey")
+            if probe["codec"] in ("H264", "H265", "HEVC"):
+                lines.append(f"   Picture settings (SPS/PPS): in stream "
+                             f"{'yes' if probe['param_sets'] else 'NO'}, in SDP "
+                             f"{'yes' if probe.get('sdp_params') else 'no'}; "
+                             f"pictures {probe.get('pictures', 0)}, damaged "
+                             f"{probe.get('lost', 0)} packets lost")
         else:
             lines.append(f"3. Video data (no decoder, TCP): NONE. The device accepted the "
                          f"request but sent no video in {PROBE_SECONDS} s")
@@ -200,7 +214,10 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
 
     if conclusion is None:
         from app.core.av_capture import AVAILABLE as pyav_ok
-        attempts = [("tcp", "opencv"), ("udp", "opencv")]
+        attempts = [("tcp", "opencv")]
+        if pyav_ok and url.startswith("rtsp"):
+            attempts.append(("tcp", "rtp"))
+        attempts.append(("udp", "opencv"))
         if pyav_ok:
             attempts += [("tcp", "pyav"), ("udp", "pyav")]
         results = {}
@@ -209,9 +226,13 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
             offset = _native_offset()
             r = _try_stream(url, transport, stream_seconds, backend)
             results[(transport, backend)] = r
+            ok = r["full"] >= MIN_GOOD_FRAMES
             if r["frames"] and not r["full"]:
                 summary = (f"{r['frames']} frames, {r['size']}, but ALL GREY (no full picture "
                            f"in {stream_seconds:.0f} s)")
+            elif r["frames"] and not ok:
+                summary = (f"only {r['frames']} picture(s), first after "
+                           f"{r['first_frame_s']:.1f} s: too few to watch")
             elif r["frames"]:
                 summary = (f"{r['frames']} frames, {r['size']}, first picture after "
                            f"{r['first_frame_s']:.1f} s")
@@ -219,25 +240,34 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
                 summary = f"opened in {r['open_s']:.1f} s but NO picture ({r['read_errors']} read errors)"
             else:
                 summary = f"could not open (after {r['open_s']:.1f} s)"
-            decoder = "standard decoder" if backend == "opencv" else "alternative decoder"
+            decoder = {"opencv": "standard decoder", "rtp": "direct decoder"}.get(
+                backend, "alternative decoder")
             lines.append(f"{step}. Video over {transport.upper()}, {decoder}: {summary}")
             for msg in _native_since(offset):
                 lines.append(f"     video library: {mask(msg, pwd)}")
-            if r["full"]:
+            if ok:
                 break  # found a working combination
-        working = [k for k, r in results.items() if r["full"]]
+        working = [k for k, r in results.items() if r["full"] >= MIN_GOOD_FRAMES]
         grey = any(r["frames"] for r in results.values())
         if working:
             transport, backend = working[0]
             if (transport, backend) == ("tcp", "opencv"):
                 conclusion = ("Video works. If Live View still fails, too many streams may be "
                               "open at once: show fewer cameras per page.")
+            elif backend == "rtp":
+                conclusion = ("Video works with ClassGuard's direct decoder. Live View switches "
+                              "to it automatically for this camera.")
             elif backend == "pyav":
                 conclusion = (f"Video works with the alternative decoder over {transport.upper()}."
                               " ClassGuard switches to it automatically (Auto transport).")
             else:
                 conclusion = ("Video works only over UDP. Leave RTSP transport on Auto, or set "
                               "it to UDP for this camera.")
+        elif probe and probe["keyframes"]:
+            conclusion = ("The NVR sends video and full pictures correctly, but no decoder on "
+                          f"this PC could show them. A sample of the video was saved to "
+                          f"{sample_path(cam)} ; please send it with this report. Meanwhile "
+                          "ClassGuard shows still pictures for Hikvision devices.")
         elif grey or (probe and probe["packets"] and not probe["keyframes"]
                       and probe["codec"] in ("H264", "H265", "HEVC")):
             conclusion = ("Video arrives, but without full pictures (keyframes), so it shows "

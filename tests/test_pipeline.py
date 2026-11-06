@@ -316,9 +316,9 @@ def test_pyav_decodes_h265_rtsp(rtsp_camera):
         cap.release()
 
 
-def test_switches_to_alternative_decoder_when_no_picture(qtbot, rtsp_camera, monkeypatch):
+def test_switches_to_direct_decoder_when_no_picture(qtbot, rtsp_camera, monkeypatch):
     """Reproduces the Hikvision H.265 case: OpenCV opens the stream but never
-    produces a picture; ClassGuard must switch to PyAV and show video."""
+    produces a picture; ClassGuard must switch to its direct decoder and show video."""
     from app.core import stream_manager as smod
     from app.core.av_capture import AVAILABLE
     if not AVAILABLE:
@@ -344,8 +344,8 @@ def test_switches_to_alternative_decoder_when_no_picture(qtbot, rtsp_camera, mon
     try:
         _wait(qtbot, lambda: frames, 40000)
         ok_msgs = [m for ok, m in statuses if ok]
-        assert ok_msgs and "alt. decoder" in ok_msgs[0]
-        assert any("Trying the alternative decoder" in m for ok, m in statuses if not ok)
-        assert sm.learned_backend[1] == "pyav"
+        assert ok_msgs and "direct decoder" in ok_msgs[0]
+        assert any("Trying the direct decoder" in m for ok, m in statuses if not ok)
+        assert sm.learned_backend[1] == "rtp"
     finally:
         sm.stop_all(wait_ms=30000)

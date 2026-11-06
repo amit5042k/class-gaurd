@@ -118,6 +118,9 @@ def _open_guarded(source: str, params, options: str) -> cv2.VideoCapture:
 
 
 def open_capture(source: str, transport: str = "tcp", backend: str = "opencv"):
+    if backend == "rtp":
+        from app.core.rtp_capture import RTPCapture
+        return RTPCapture(source, OPEN_TIMEOUT_MS / 1000, READ_TIMEOUT_MS / 1000)
     if backend == "pyav":
         from app.core.av_capture import AVCapture
         return AVCapture(source, transport, OPEN_TIMEOUT_MS / 1000, READ_TIMEOUT_MS / 1000)
@@ -152,6 +155,10 @@ def to_qimage(frame: np.ndarray, max_width: int = 0) -> QImage:
     return QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
 
 
+BACKENDS = ("opencv", "rtp", "pyav")
+BACKEND_LABELS = {"opencv": "", "rtp": " (direct decoder)", "pyav": " (alt. decoder)"}
+
+
 class _Retry(Exception):
     """Skip this attempt and wait before the next one."""
 
@@ -177,23 +184,32 @@ class StreamThread(QThread):
         self.transport = transport if transport in ("tcp", "udp") else "auto"
         self._current = "udp" if self.transport == "udp" or \
             (self.transport == "auto" and first == "udp") else "tcp"
-        self._backend = backend if backend in ("opencv", "pyav") else "opencv"
+        self._backend = backend if backend in BACKENDS else "opencv"
         self._keyframe_request = keyframe_request
         self._snapshot = snapshot
         self._snapshot_ok = snapshot is not None
+        self._snapshot_failures = 0
         self._last_display = 0.0
 
     def _next_attempt(self) -> str:
-        """After "connected but no picture": try the other decoder first (some
-        H.265 streams only decode with PyAV), then the other transport."""
+        """After "connected but no picture": try the direct decoder (our own RTSP
+        reader), then the alternative decoder, then the other transport."""
         from app.core.av_capture import AVAILABLE
-        if self._backend == "opencv" and AVAILABLE:
+        rtsp = str(self.rtsp_url).startswith("rtsp")
+        if self._backend == "opencv" and AVAILABLE and rtsp:
+            self._backend = "rtp"
+            return "the direct decoder"
+        if self._backend in ("opencv", "rtp") and AVAILABLE:
             self._backend = "pyav"
             return "the alternative decoder"
         self._backend = "opencv"
         if self._switch_transport():
             return self._current.upper()
         return ""
+
+    def _direct_possible(self) -> bool:
+        from app.core.av_capture import AVAILABLE
+        return AVAILABLE and str(self.rtsp_url).startswith("rtsp")
 
     def _switch_transport(self) -> bool:
         """Auto mode: try the other RTSP transport after a failed attempt."""
@@ -240,7 +256,9 @@ class StreamThread(QThread):
                     # Some recorders refuse one RTSP transport (e.g. 461 Unsupported
                     # transport), so alternate unless the device gave a reason that
                     # another transport can't fix.
-                    if last_kind not in ("unreachable", "auth", "not_found"):
+                    if self._backend != "opencv":
+                        self._backend = "opencv"     # that decoder can't connect here
+                    elif last_kind not in ("unreachable", "auth", "not_found"):
                         self._switch_transport()
                     failures += 1
                     self.status_changed.emit(self.camera_id, False,
@@ -248,6 +266,7 @@ class StreamThread(QThread):
                 else:
                     bad_reads = 0
                     full_seen = False
+                    grey_shown = False
                     waiting_since = None
                     warned = False
                     last_kf_request = 0.0
@@ -272,6 +291,8 @@ class StreamThread(QThread):
                                                              WAITING_KEYFRAME)
                                 elif not warned and now - waiting_since > GREY_WARN_S:
                                     warned = True
+                                    if self._backend == "opencv" and self._direct_possible():
+                                        break    # try the direct decoder (no picture yet)
                                     if self._snapshot_ok:
                                         go_snapshot = True   # stills beat a grey tile
                                         break
@@ -284,13 +305,15 @@ class StreamThread(QThread):
                                     continue
                                 # A real flat grey scene, or no keyframes at all:
                                 # show what we have rather than nothing.
+                                grey_shown = True
                             full_seen = True
                         if not got_frame:
                             got_frame = True
                             failures, reason, delay = 0, "", self._base_delay
                             label = "Connected" + (" (UDP)" if self._current == "udp" else "") \
-                                + (" (alt. decoder)" if self._backend == "pyav" else "")
-                            self.status_changed.emit(self.camera_id, True, label)
+                                + BACKEND_LABELS.get(self._backend, "")
+                            self.status_changed.emit(self.camera_id, True,
+                                                     NO_KEYFRAME_MSG if grey_shown else label)
                             if not learned:
                                 learned = True
                                 if self.transport == "auto":
@@ -303,7 +326,8 @@ class StreamThread(QThread):
                         else:
                             failures += 1
                             tried = f"{self._current.upper()}" + \
-                                (" with the alternative decoder" if self._backend == "pyav" else "")
+                                {"pyav": " with the alternative decoder",
+                                 "rtp": " with the direct decoder"}.get(self._backend, "")
                             nxt = self._next_attempt()
                             msg = f"Connected, but no picture arrived over {tried}."
                             silent = failures % 4 == 1 and self._device_sends_nothing()
@@ -359,8 +383,13 @@ class StreamThread(QThread):
         while. False if the device gives no stills (then never try again)."""
         img = self._grab_snapshot()
         if img is None:
-            self._snapshot_ok = False
+            # The NVR may be busy right then (many cameras at once): give up only
+            # after several tries.
+            self._snapshot_failures += 1
+            if self._snapshot_failures >= 3:
+                self._snapshot_ok = False
             return False
+        self._snapshot_failures = 0
         logger.warning("Camera %s: video has no full pictures; showing still pictures",
                        self.camera_id)
         self.status_changed.emit(self.camera_id, True, SNAPSHOT_MSG)
