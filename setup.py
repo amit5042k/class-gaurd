@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="classguard",
-    version="2.1.2",
+    version="2.2.0",
     description="ClassGuard — Multi-brand Camera Management Desktop App",
     packages=find_packages(exclude=["tests"]),
     py_modules=["main"],

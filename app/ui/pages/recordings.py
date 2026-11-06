@@ -8,7 +8,7 @@ from PyQt6.QtCore import QDate, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 )
 
 from app.config import Config
@@ -29,14 +29,24 @@ class RecordingsPage(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 16, 20, 16)
+        outer.setSpacing(8)
+        title = QLabel("Recordings")
+        title.setObjectName("page_title")
+        outer.addWidget(title)
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs, 1)
+        local = QWidget()
+        self.tabs.addTab(local, "Recorded by ClassGuard (this PC)")
+        from app.ui.pages.nvr_playback import NVRPlaybackTab
+        self.nvr = NVRPlaybackTab()
+        self.tabs.addTab(self.nvr, "Recorded on the NVR / camera")
+        root = QVBoxLayout(local)
+        root.setContentsMargins(0, 8, 0, 0)
         root.setSpacing(8)
 
         hdr = QHBoxLayout()
-        title = QLabel("Recordings")
-        title.setObjectName("page_title")
-        hdr.addWidget(title)
         hdr.addStretch()
         hdr.addWidget(QLabel("Camera:"))
         self._cam_cb = QComboBox()
@@ -124,6 +134,7 @@ class RecordingsPage(QWidget):
         idx = self._cam_cb.findData(current)
         self._cam_cb.setCurrentIndex(max(idx, 0))
         self._cam_cb.blockSignals(False)
+        self.nvr.set_cameras(cameras)
         self.refresh()
 
     def refresh(self):
@@ -178,6 +189,13 @@ class RecordingsPage(QWidget):
         if later:
             self._table.selectRow(later[0])
             self._play_row(later[0])
+
+    def open_nvr_playback(self, camera_id: int, when: datetime) -> bool:
+        """Play the recorder's own recording of a camera at `when`."""
+        if not self.nvr.has_camera(camera_id):
+            return False
+        self.tabs.setCurrentWidget(self.nvr)
+        return self.nvr.open_camera_at(camera_id, when)
 
     def open_recording(self, camera_id: int, path: str, start: datetime, offset: float):
         """Called from an alert: show that camera/day and play from `offset`."""

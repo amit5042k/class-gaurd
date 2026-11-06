@@ -162,6 +162,7 @@ class MainWindow(QMainWindow):
         self._p_live.fullscreen_requested.connect(self._toggle_fullscreen)
         self._p_live.playback_requested.connect(self._play_alert_video)
         self._p_alerts.video_requested.connect(self._play_alert_video)
+        self._p_rec.nvr.message.connect(lambda m: self.statusBar().showMessage(m, 8000))
         self._sidebar.lock_requested.connect(self.lock)
         self._sidebar.password_requested.connect(self._change_password)
         QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
@@ -286,9 +287,15 @@ class MainWindow(QMainWindow):
     def _play_alert_video(self, camera_id: int, when):
         hit = find_recording_at(self.db, camera_id, when)
         if not hit:
+            # Not recorded on this PC: play the NVR's own recording instead.
+            if self._p_rec.nvr.has_camera(camera_id):
+                self._sidebar.set_active("recordings")
+                self._p_rec.open_nvr_playback(camera_id, when)
+                return
             self.statusBar().showMessage(
                 "No finished recording covers that time for this camera.", 8000)
             return
+        self._p_rec.tabs.setCurrentIndex(0)
         self._sidebar.set_active("recordings")
         self._p_rec.open_recording(camera_id, hit["path"], hit["start"],
                                    max(0.0, hit["offset"] - 5))
@@ -377,6 +384,7 @@ class MainWindow(QMainWindow):
         audit(self.db, "exit", f"{self.user.username} closed ClassGuard")
         self._p_live.ptz.shutdown()
         self._p_rec.player.close_file()
+        self._p_rec.nvr.shutdown()
         self.stream_mgr.stop_all(wait_ms=3000)
         self.recorder.stop_all()
         self.ai.stop()

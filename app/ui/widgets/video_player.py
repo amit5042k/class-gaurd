@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
 from app.core.stream_manager import to_qimage
 from app.ui.widgets.zone_canvas import VideoCanvas
 
-KIND_COLORS = {"continuous": "#2f6fd6", "motion": "#f39c12", "manual": "#27ae60"}
+KIND_COLORS = {"continuous": "#2f6fd6", "motion": "#f39c12", "manual": "#27ae60",
+               "event": "#e74c3c"}
 
 
 def fmt_secs(s: float) -> str:
