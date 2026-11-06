@@ -308,5 +308,5 @@ def test_playback_continues_when_the_recorder_ends_the_session(qtbot, monkeypatc
         t.wait(5000)
     assert len(asked) == page_mod.MAX_RESUMES                  # continued each time
     assert all(b > a for a, b in zip(asked, asked[1:]))        # from where it was
-    assert asked[0] > start and positions[-1] > asked[-1]
+    assert asked[0] > start and positions[-1] >= asked[-1]   # Windows clock is coarse
     assert ended == ["The recording ended."]
