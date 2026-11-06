@@ -10,6 +10,7 @@ import hashlib
 import os
 import re
 import socket
+import time
 from typing import Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
@@ -160,3 +161,164 @@ def explain_failure(url: str) -> Optional[str]:
         return ("The device offers the stream, but it couldn't be decoded. Try the "
                 "sub-stream, or set the camera to H.264.")
     return msg
+
+
+# ------------------------------------------------------------ media probe
+class _Client:
+    """Just enough RTSP (with Digest/Basic login) to SETUP + PLAY over TCP."""
+
+    def __init__(self, url: str, timeout: float):
+        self.host, self.port, self.user, self.pwd, self.url = _split(url)
+        self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        self.sock.settimeout(timeout)
+        self.buf = b""
+        self.cseq = 0
+        self.challenge = None  # ("digest"|"basic", params)
+
+    def _auth(self, method: str, uri: str) -> str:
+        if not self.challenge or not self.user:
+            return ""
+        kind, chal = self.challenge
+        if kind == "basic":
+            return "Basic " + base64.b64encode(f"{self.user}:{self.pwd}".encode()).decode()
+        p = dict(re.findall(r'(\w+)="?([^",]*)"?', chal))
+        ha1 = hashlib.md5(f"{self.user}:{p.get('realm', '')}:{self.pwd}".encode()).hexdigest()
+        ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+        resp = hashlib.md5(f"{ha1}:{p.get('nonce', '')}:{ha2}".encode()).hexdigest()
+        return (f'Digest username="{self.user}", realm="{p.get("realm", "")}", '
+                f'nonce="{p.get("nonce", "")}", uri="{uri}", response="{resp}"')
+
+    def _read_reply(self):
+        while b"\r\n\r\n" not in self.buf:
+            # Skip interleaved packets that may arrive before a reply.
+            if self.buf[:1] == b"$" and len(self.buf) >= 4:
+                n = int.from_bytes(self.buf[2:4], "big")
+                if len(self.buf) >= 4 + n:
+                    self.buf = self.buf[4 + n:]
+                    continue
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("connection closed by the device")
+            self.buf += chunk
+        head, _, rest = self.buf.partition(b"\r\n\r\n")
+        lines = head.decode("latin-1").split("\r\n")
+        m = re.match(r"RTSP/\d\.\d\s+(\d{3})", lines[0])
+        if not m:
+            raise ConnectionError(f"unexpected reply {lines[0][:60]!r}")
+        headers = {}
+        for line in lines[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers.setdefault(k.strip().lower(), []).append(v.strip())
+        length = int((headers.get("content-length") or ["0"])[0] or 0)
+        while len(rest) < length:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                break
+            rest += chunk
+        headers["_body"] = rest[:length].decode("latin-1", "replace")
+        self.buf = rest[length:]
+        return int(m.group(1)), headers
+
+    def request(self, method: str, uri: str, extra=()):
+        for attempt in range(2):
+            self.cseq += 1
+            lines = [f"{method} {uri} RTSP/1.0", f"CSeq: {self.cseq}", "User-Agent: ClassGuard",
+                     *extra]
+            auth = self._auth(method, uri)
+            if auth:
+                lines.append(f"Authorization: {auth}")
+            self.sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+            code, headers = self._read_reply()
+            if code == 401 and attempt == 0 and self.user:
+                chals = headers.get("www-authenticate", [])
+                dig = next((c for c in chals if c.lower().startswith("digest")), None)
+                self.challenge = ("digest", dig[6:].strip()) if dig else ("basic", "")
+                continue
+            return code, headers
+        return code, headers
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def _video_control(sdp: str, base: str) -> str:
+    in_video, control = False, None
+    for line in sdp.splitlines():
+        if line.startswith("m="):
+            in_video = line.startswith("m=video")
+        elif in_video and line.startswith("a=control:"):
+            control = line.split(":", 1)[1].strip()
+            break
+    if not control or control == "*":
+        return base
+    if control.lower().startswith("rtsp://"):
+        return control
+    return base.rstrip("/") + "/" + control
+
+
+def media_probe(url: str, seconds: float = 5.0, timeout: float = 5.0) -> dict:
+    """Request the stream over RTSP/TCP and count the video packets that arrive,
+    without decoding. Tells "the device sends nothing" apart from "the decoder
+    can't decode what it sends"."""
+    res = {"packets": 0, "bytes": 0, "first_s": None, "error": ""}
+    try:
+        c = _Client(url, timeout)
+    except OSError as e:
+        res["error"] = f"can't connect: {e}"
+        return res
+    try:
+        code, h = c.request("DESCRIBE", c.url, ["Accept: application/sdp"])
+        if code != 200:
+            res["error"] = f"DESCRIBE answered {code}"
+            return res
+        base = (h.get("content-base") or h.get("content-location") or [c.url])[0]
+        control = _video_control(h["_body"], base)
+        code, h = c.request("SETUP", control,
+                            ["Transport: RTP/AVP/TCP;unicast;interleaved=0-1"])
+        if code != 200:
+            res["error"] = f"SETUP answered {code}"
+            return res
+        session = (h.get("session") or [""])[0].split(";")[0]
+        code, h = c.request("PLAY", base, [f"Session: {session}", "Range: npt=0.000-"])
+        if code != 200:
+            res["error"] = f"PLAY answered {code}"
+            return res
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < seconds:
+            while len(c.buf) >= 4 and c.buf[:1] == b"$":
+                n = int.from_bytes(c.buf[2:4], "big")
+                if len(c.buf) < 4 + n:
+                    break
+                if c.buf[1] == 0:  # RTP channel of the video track
+                    res["packets"] += 1
+                    res["bytes"] += n
+                    if res["first_s"] is None:
+                        res["first_s"] = time.monotonic() - t0
+                c.buf = c.buf[4 + n:]
+            if c.buf and c.buf[:1] != b"$":
+                if b"\r\n\r\n" in c.buf:      # e.g. an RTSP message from the device
+                    c.buf = c.buf.partition(b"\r\n\r\n")[2]
+                    continue
+            try:
+                c.sock.settimeout(max(0.1, seconds - (time.monotonic() - t0)))
+                chunk = c.sock.recv(65536)
+            except socket.timeout:
+                break
+            if not chunk:
+                res["error"] = "the device closed the connection"
+                break
+            c.buf += chunk
+        try:
+            c.sock.settimeout(1)
+            c.request("TEARDOWN", base, [f"Session: {session}"])
+        except Exception:
+            pass
+    except Exception as e:
+        res["error"] = str(e)
+    finally:
+        c.close()
+    return res

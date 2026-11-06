@@ -15,8 +15,9 @@ REALM, NONCE = "IP Camera(12345)", "abc123nonce"
 class MockNVR:
     """Answers DESCRIBE like a Dahua-style NVR: Digest auth, video only on some channels."""
 
-    def __init__(self, user="admin", pwd="Secret@12", live=(1, 5), busy=()):
+    def __init__(self, user="admin", pwd="Secret@12", live=(1, 5), busy=(), silent=()):
         self.user, self.pwd, self.live, self.busy = user, pwd, set(live), set(busy)
+        self.silent = set(silent)  # channels that accept PLAY but send no video
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -42,13 +43,18 @@ class MockNVR:
                 while b"\r\n\r\n" in buf:
                     req, buf = buf.split(b"\r\n\r\n", 1)
                     conn.sendall(self._answer(req.decode()).encode())
+                    if req.startswith(b"PLAY"):
+                        ch = int(re.search(rb"channel=(\d+)", req).group(1))
+                        if ch not in self.silent:
+                            for _ in range(50):   # interleaved RTP on channel 0
+                                conn.sendall(b"$\x00\x00\x0c" + b"\x80" * 12)
 
     def _answer(self, req: str) -> str:
         first = req.split("\r\n")[0]
-        url = first.split(" ")[1]
+        method, url = first.split(" ")[0], first.split(" ")[1]
         cseq = re.search(r"CSeq: (\d+)", req).group(1)
         auth = re.search(r"Authorization: (.*)", req)
-        if not auth or not self._valid(auth.group(1), url):
+        if not auth or not self._valid(auth.group(1), url, method):
             return (f"RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\n"
                     f'WWW-Authenticate: Digest realm="{REALM}", nonce="{NONCE}"\r\n\r\n')
         ch = int(re.search(r"channel=(\d+)", url).group(1))
@@ -56,12 +62,17 @@ class MockNVR:
             return f"RTSP/1.0 453 Not Enough Bandwidth\r\nCSeq: {cseq}\r\n\r\n"
         if ch not in self.live:
             return f"RTSP/1.0 404 Not Found\r\nCSeq: {cseq}\r\n\r\n"
-        return f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Length: 0\r\n\r\n"
+        if method == "DESCRIBE":
+            sdp = "v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=control:trackID=1\r\n"
+            return (f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Base: {url}/\r\n"
+                    f"Content-Type: application/sdp\r\nContent-Length: {len(sdp)}\r\n\r\n{sdp}")
+        extra = "Session: 12345;timeout=60\r\n" if method in ("SETUP", "PLAY") else ""
+        return f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n{extra}Content-Length: 0\r\n\r\n"
 
-    def _valid(self, header: str, url: str) -> bool:
+    def _valid(self, header: str, url: str, method: str = "DESCRIBE") -> bool:
         p = dict(re.findall(r'(\w+)="?([^",]*)"?', header))
         ha1 = hashlib.md5(f"{self.user}:{REALM}:{self.pwd}".encode()).hexdigest()
-        ha2 = hashlib.md5(f"DESCRIBE:{url}".encode()).hexdigest()
+        ha2 = hashlib.md5(f"{method}:{url}".encode()).hexdigest()
         expected = hashlib.md5(f"{ha1}:{NONCE}:{ha2}".encode()).hexdigest()
         return p.get("username") == self.user and p.get("response") == expected
 
@@ -215,3 +226,42 @@ def test_slow_udp_open_does_not_block_other_cameras():
         t.join()
     finally:
         smod.cv2.VideoCapture = real
+
+
+def test_media_probe_counts_packets_and_detects_silence():
+    from app.protocols.rtsp_diag import media_probe
+    m = MockNVR(silent={5})
+    try:
+        live = media_probe(m.url(1), seconds=1)
+        assert live["packets"] == 50 and not live["error"], live
+        silent = media_probe(m.url(5), seconds=1)
+        assert silent["packets"] == 0 and not silent["error"], silent
+    finally:
+        m.close()
+
+
+def test_report_says_no_video_data_for_silent_channel():
+    from app.core.diagnose import run_diagnosis
+    m = MockNVR(silent={5})
+    try:
+        report = run_diagnosis({"name": "NVR1 - Channel 5", "brand": "Hikvision", "channel": 5,
+                                "rtsp_url": m.url(5), "password": "Secret@12"},
+                               stream_seconds=1)
+        assert "Video data (no decoder, TCP): NONE" in report
+        assert "sends NO video data" in report and "Secret" not in report
+    finally:
+        m.close()
+
+
+def test_tile_says_device_sends_nothing(qtbot):
+    from app.core.stream_manager import StreamManager
+    m = MockNVR(silent={5})
+    sm = StreamManager()
+    statuses = []
+    sm.start_stream(5, m.url(5), on_status=lambda cid, ok, msg: statuses.append(msg))
+    try:
+        qtbot.waitUntil(lambda: any("sends no video data" in s for s in statuses),
+                        timeout=60000)
+    finally:
+        sm.stop_all(wait_ms=30000)
+        m.close()

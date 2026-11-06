@@ -23,6 +23,8 @@ READ_TIMEOUT_MS = 10_000
 DISPLAY_MAX_WIDTH = 1280
 DISPLAY_FPS = 15  # screen refresh cap; recording and AI still get every frame
 CONNECTING = "Connecting…"
+SILENT_MSG = ("The device accepts the connection but sends no video data. Is the camera "
+              "on this channel online? Security software on this PC can also block it.")
 
 
 class _TransportLock:
@@ -202,6 +204,8 @@ class StreamThread(QThread):
                     # so the tile says "wrong password" or "no camera on this channel".
                     if failures % 5 == 0:
                         last_kind, reason = self._diagnose()
+                        if last_kind == "ok" and self._device_sends_nothing():
+                            reason = SILENT_MSG
                     # Some recorders refuse one RTSP transport (e.g. 461 Unsupported
                     # transport), so alternate unless the device gave a reason that
                     # another transport can't fix.
@@ -253,7 +257,10 @@ class StreamThread(QThread):
                                 (" with the alternative decoder" if self._backend == "pyav" else "")
                             nxt = self._next_attempt()
                             msg = f"Connected, but no picture arrived over {tried}."
-                            if nxt:
+                            silent = failures % 4 == 1 and self._device_sends_nothing()
+                            if silent:
+                                msg = SILENT_MSG
+                            elif nxt:
                                 msg += f" Trying {nxt}…"
                             self.status_changed.emit(self.camera_id, False, msg)
                             logger.warning("Camera %s: opened over %s but no frames",
@@ -271,6 +278,16 @@ class StreamThread(QThread):
             if self._running:
                 self._sleep(delay)
                 delay = min(delay * 2, 30)
+
+    def _device_sends_nothing(self) -> bool:
+        if not str(self.rtsp_url).startswith("rtsp"):
+            return False
+        try:
+            from app.protocols.rtsp_diag import media_probe
+            r = media_probe(self.rtsp_url, seconds=4)
+            return not r["error"] and r["packets"] == 0
+        except Exception:
+            return False
 
     def _precheck(self):
         if not str(self.rtsp_url).startswith("rtsp"):

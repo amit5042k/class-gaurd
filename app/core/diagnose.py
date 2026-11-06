@@ -147,13 +147,28 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
         if d["kind"] != OK:
             conclusion = d["message"]
 
+    probe = None
+    if conclusion is None and url.startswith("rtsp"):
+        from app.protocols.rtsp_diag import media_probe
+        time.sleep(1)
+        probe = media_probe(url, seconds=5)
+        if probe["error"]:
+            lines.append(f"3. Video data (no decoder, TCP): failed: {probe['error']}")
+        elif probe["packets"]:
+            lines.append(f"3. Video data (no decoder, TCP): {probe['packets']} packets, "
+                         f"{probe['bytes'] // 1024} KB in 5 s, first after "
+                         f"{probe['first_s']:.1f} s")
+        else:
+            lines.append("3. Video data (no decoder, TCP): NONE. The device accepted the "
+                         "request but sent no video in 5 s")
+
     if conclusion is None:
         from app.core.av_capture import AVAILABLE as pyav_ok
         attempts = [("tcp", "opencv"), ("udp", "opencv")]
         if pyav_ok:
             attempts += [("tcp", "pyav"), ("udp", "pyav")]
         results = {}
-        for step, (transport, backend) in enumerate(attempts, start=3):
+        for step, (transport, backend) in enumerate(attempts, start=4):
             time.sleep(1)  # some devices briefly refuse a request right after another
             offset = _native_offset()
             r = _try_stream(url, transport, stream_seconds, backend)
@@ -183,6 +198,17 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
             else:
                 conclusion = ("Video works only over UDP. Leave RTSP transport on Auto, or set "
                               "it to UDP for this camera.")
+        elif probe and not probe["error"] and probe["packets"] == 0:
+            conclusion = ("The NVR accepts the request but sends NO video data, so this is not "
+                          "a decoding problem. Most likely: (1) the camera on this NVR channel "
+                          "is offline: check it shows Online in the NVR's camera list; or "
+                          "(2) security software / firewall on this PC is blocking RTSP video: "
+                          "test the same address in VLC on this PC, or briefly disable the "
+                          "antivirus web/network protection.")
+        elif probe and probe["packets"]:
+            conclusion = (f"Video data arrives ({probe['packets']} packets in 5 s) but no "
+                          "decoder could turn it into pictures. Set this stream to H.264 "
+                          "with H.264+/Smart Codec off, and send this report to support.")
         else:
             media = " ".join(lines).upper()
             if "H265" in media or "HEVC" in media:
