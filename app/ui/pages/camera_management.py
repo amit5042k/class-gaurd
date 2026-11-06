@@ -412,12 +412,17 @@ class CameraManagement(QWidget):
             al.setSpacing(4)
             edit_btn = QPushButton("Edit")
             edit_btn.setObjectName("secondary_btn")
+            cfg_btn = QPushButton("Configure")
+            cfg_btn.setObjectName("secondary_btn")
+            cfg_btn.setToolTip("Change the camera's video settings on the device itself")
             del_btn = QPushButton("Delete")
             del_btn.setObjectName("danger_btn")
             cid = cam["id"]
             edit_btn.clicked.connect(lambda _, i=cid: self._edit(i))
+            cfg_btn.clicked.connect(lambda _, i=cid: self._configure(i))
             del_btn.clicked.connect(lambda _, i=cid: self._delete(i))
             al.addWidget(edit_btn)
+            al.addWidget(cfg_btn)
             al.addWidget(del_btn)
             self._table.setCellWidget(r, len(COLS) - 1, actions)
 
@@ -433,6 +438,20 @@ class CameraManagement(QWidget):
             audit(self.db, "camera_add", f"{data['name']} ({data['brand']} {data['host']})")
             self.refresh()
             self.cameras_changed.emit()
+
+    def _configure(self, camera_id: int):
+        from app.protocols.device_config import supports_config
+        from app.ui.pages.device_config_dialog import DeviceConfigDialog
+        cam = self.mgr.get_camera(camera_id)
+        if not cam:
+            return
+        if not supports_config(cam):
+            QMessageBox.information(self, "Configure", "Remote configuration works for "
+                                    "Hikvision, Dahua and CP Plus cameras and recorders.")
+            return
+        # A camera on an NVR is configured through the NVR, on its channel.
+        DeviceConfigDialog(cam, cam.get("channel") or 1, is_nvr=False, db=self.db,
+                           parent=self).exec()
 
     def _edit(self, camera_id: int):
         cam = self.mgr.get_camera(camera_id)

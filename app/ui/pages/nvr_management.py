@@ -195,6 +195,7 @@ class NVRManagement(QWidget):
             nid = nvr["id"]
             for text, name, fn in (("Import channels", "success_btn", self._import),
                                    ("Check channels", "secondary_btn", self._check),
+                                   ("Configure", "secondary_btn", self._configure),
                                    ("Edit", "secondary_btn", self._edit),
                                    ("Delete", "danger_btn", self._delete)):
                 b = QPushButton(text)
@@ -202,6 +203,18 @@ class NVRManagement(QWidget):
                 b.clicked.connect(lambda _, i=nid, f=fn: f(i))
                 al.addWidget(b)
             self._table.setCellWidget(r, len(NVR_COLS) - 1, act)
+
+    def _configure(self, nvr_id: int):
+        from app.protocols.device_config import supports_config
+        from app.ui.pages.device_config_dialog import DeviceConfigDialog
+        nvr = self.mgr.get_nvr(nvr_id)
+        if not nvr:
+            return
+        if not supports_config(nvr):
+            QMessageBox.information(self, "Configure", "Remote configuration works for "
+                                    "Hikvision, Dahua and CP Plus recorders.")
+            return
+        DeviceConfigDialog(nvr, 1, is_nvr=True, db=self.db, parent=self).exec()
 
     def _add(self):
         dlg = NVRDialog(parent=self)
