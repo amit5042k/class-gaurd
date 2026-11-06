@@ -43,7 +43,7 @@ class MainWindow(QMainWindow):
         self.user = user or CurrentUser(0, "admin", "admin", "")
         Session.current = self.user
         self._background, self._manual_rec, self._monitor_by_kind = set(), set(), {}
-        self.setWindowTitle(Config.APP_NAME)
+        self.setWindowTitle(f"{Config.APP_NAME}  —  version {Config.VERSION}")
         self.setMinimumSize(1280, 780)
         self.resize(1440, 860)
         self.setStyleSheet(DARK)

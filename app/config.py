@@ -23,7 +23,7 @@ def resource_path(*parts: str) -> str:
 
 class Config:
     APP_NAME = "ClassGuard - Camera Management System"
-    VERSION = "2.0.6"
+    VERSION = "2.0.7"
 
     DATA_DIR = os.path.join(os.path.expanduser("~"), ".classguard")
     DB_PATH = os.path.join(DATA_DIR, "classguard.db")

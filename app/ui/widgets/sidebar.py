@@ -51,7 +51,8 @@ class Sidebar(QWidget):
         la.setContentsMargins(16, 18, 16, 8)
         title = QLabel("ClassGuard")
         title.setObjectName("app_title")
-        sub = QLabel("Camera Management System")
+        from app.config import Config
+        sub = QLabel(f"Camera Management System · v{Config.VERSION}")
         sub.setObjectName("app_sub")
         la.addWidget(title)
         la.addWidget(sub)

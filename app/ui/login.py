@@ -21,7 +21,8 @@ class _Base(QDialog):
         self.setStyleSheet(DARK)
         self.setMinimumWidth(380)
         self.lay = QVBoxLayout(self)
-        brand = QLabel("ClassGuard")
+        brand = QLabel(f"ClassGuard <span style='color:#777; font-size:12px;'>"
+                       f"v{Config.VERSION}</span>")
         brand.setObjectName("app_title")
         brand.setStyleSheet("color:#ef4565; font-size:20px; font-weight:bold;")
         self.lay.addWidget(brand)
@@ -154,5 +155,5 @@ def sign_in(db) -> "object | None":
         if FirstRunDialog(users).exec() != QDialog.DialogCode.Accepted:
             return None
     dlg = LoginDialog(users)
-    dlg.setWindowTitle(f"Sign in — {Config.APP_NAME}")
+    dlg.setWindowTitle(f"Sign in — {Config.APP_NAME} {Config.VERSION}")
     return dlg.user if dlg.exec() == QDialog.DialogCode.Accepted else None

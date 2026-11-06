@@ -171,3 +171,19 @@ def test_main_window_starts_and_every_page_opens(qtbot, db, monkeypatch):
         assert len(w.toasts._toasts) == 1
     finally:
         w.close()
+
+
+def test_version_is_shown(qtbot, db):
+    from app.ui.login import LoginDialog
+    from app.core.security import UserService
+    from app.ui.main_window import MainWindow
+    w = MainWindow(db)
+    qtbot.addWidget(w)
+    try:
+        assert Config.VERSION in w.windowTitle()
+        assert f"v{Config.VERSION}" in w._sidebar.findChildren(type(w._sb_cams))[1].text()
+    finally:
+        w.close()
+    dlg = LoginDialog(UserService(db))
+    qtbot.addWidget(dlg)
+    assert Config.VERSION in dlg.findChildren(type(w._sb_cams))[0].text()
