@@ -181,6 +181,7 @@ class StreamThread(QThread):
     status_changed = pyqtSignal(int, bool, str)
     transport_learned = pyqtSignal(int, str)   # camera_id, "tcp" | "udp"
     backend_learned = pyqtSignal(int, str)     # camera_id, "opencv" | "pyav"
+    url_learned = pyqtSignal(int, str)         # camera_id, address form that works
 
     def __init__(self, camera_id: int, rtsp_url: str,
                  listeners: List[Callable], reconnect_delay: float = 2,
@@ -258,6 +259,19 @@ class StreamThread(QThread):
                 # Ask the device first: it answers in well under a second, while a
                 # failed OpenCV open always waits the full timeout on Windows.
                 pre_kind, pre_msg = self._precheck()
+                if pre_kind == "closed":
+                    pre_kind, pre_msg = self._find_address(pre_msg)
+                    if pre_kind == "closed":
+                        # Keep trying slowly (a device that locked this PC after wrong
+                        # passwords stays locked while it is asked again), with still
+                        # pictures meanwhile where the device offers them.
+                        failures += 1
+                        last_kind, reason = pre_kind, pre_msg
+                        self.status_changed.emit(self.camera_id, False, pre_msg)
+                        delay = max(delay, 30)
+                        if self._snapshot_ok and self._snapshot_mode():
+                            delay = self._base_delay
+                        raise _Retry()
                 # "Unreachable" is certain; for the others still let OpenCV try
                 # every third attempt, in case a device answers our check oddly.
                 if pre_kind == "unreachable" or (
@@ -466,6 +480,22 @@ class StreamThread(QThread):
         except Exception:
             return False
 
+    def _find_address(self, closed_msg: str):
+        """The device hung up: try other address forms / login-first."""
+        try:
+            from app.protocols.rtsp_diag import CLOSED, find_working_url
+            url, d, _tried = find_working_url(self.rtsp_url, timeout=3)
+        except Exception:
+            logger.exception("Address search failed")
+            return "closed", closed_msg
+        if url and url != self.rtsp_url:
+            logger.warning("Camera %s answers on another address form", self.camera_id)
+            self.rtsp_url = url
+            self.url_learned.emit(self.camera_id, url)
+        if d["kind"] == CLOSED:
+            return "closed", d["message"] or closed_msg
+        return d["kind"], d["message"]
+
     def _precheck(self):
         if not str(self.rtsp_url).startswith("rtsp"):
             return "", ""
@@ -513,6 +543,7 @@ class StreamManager:
         self.frame_listeners: List[Callable] = []
         self.learned_transport: Dict[int, str] = {}
         self.learned_backend: Dict[int, str] = {}
+        self.learned_url: Dict[int, tuple] = {}   # cid -> (configured url, working url)
         from app.config import Config
         for key, v in dict(getattr(Config, "LEARNED_STREAMS", {}) or {}).items():
             try:
@@ -534,6 +565,10 @@ class StreamManager:
                      on_transport=None, keyframe_request=None,
                      snapshot=None) -> StreamThread:
         self.stop_stream(camera_id)
+        learned = self.learned_url.get(camera_id)
+        configured = rtsp_url
+        if learned and learned[0] == rtsp_url:
+            rtsp_url = learned[1]            # the address form found to work earlier
         thread = StreamThread(camera_id, rtsp_url, self.frame_listeners,
                               self.reconnect_delay, transport,
                               self.learned_transport.get(camera_id, "tcp"),
@@ -541,6 +576,8 @@ class StreamManager:
                               keyframe_request, snapshot)
         thread.transport_learned.connect(lambda cid, t: self._learn(cid, transport=t))
         thread.backend_learned.connect(lambda cid, b: self._learn(cid, backend=b))
+        thread.url_learned.connect(
+            lambda cid, u, c=configured: self.learned_url.__setitem__(cid, (c, u)))
         if on_transport:
             thread.transport_learned.connect(on_transport)
         if on_frame:
@@ -585,7 +622,7 @@ class StreamManager:
         # keep a reference until the thread exits so Qt doesn't destroy it early.
         thread.request_stop()
         for sig in (thread.frame_ready, thread.status_changed, thread.transport_learned,
-                    thread.backend_learned):
+                    thread.backend_learned, thread.url_learned):
             try:
                 sig.disconnect()
             except TypeError:

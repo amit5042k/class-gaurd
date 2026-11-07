@@ -14,8 +14,17 @@ import time
 from typing import Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
-OK, UNREACHABLE, AUTH, NOT_FOUND, BUSY, OTHER = (
-    "ok", "unreachable", "auth", "not_found", "busy", "other")
+OK, UNREACHABLE, AUTH, NOT_FOUND, BUSY, OTHER, CLOSED = (
+    "ok", "unreachable", "auth", "not_found", "busy", "other", "closed")
+
+# Devices that only answer when the login is sent with the first request
+# (found by find_working_url); host -> True.
+PREAUTH_HOSTS = {}
+
+CLOSED_MSG = ("{host} accepts the connection but closes it without answering. On the "
+              "device check: (1) this PC may be locked after wrong passwords: wait 30 min "
+              "or restart it, see Configuration > System > Security; (2) the RTSP port "
+              "(Configuration > Network > Basic > Port) is 554; (3) RTSP is enabled.")
 
 MESSAGES = {
     UNREACHABLE: "Can't reach {host}:{port}. Check the IP address, network cable/Wi-Fi "
@@ -101,7 +110,7 @@ def parse_sdp(sdp: str) -> list:
     return out
 
 
-def describe_detail(url: str, timeout: float = 4.0) -> dict:
+def describe_detail(url: str, timeout: float = 4.0, preauth: Optional[bool] = None) -> dict:
     """Like describe(), plus the RTSP status code and the media the device offers."""
     result = {"kind": OTHER, "message": "", "code": None, "media": [], "auth": "none"}
 
@@ -118,9 +127,15 @@ def describe_detail(url: str, timeout: float = 4.0) -> dict:
         sock = socket.create_connection((host, port), timeout=timeout)
     except OSError:
         return done(UNREACHABLE, MESSAGES[UNREACHABLE].format(host=host, port=port))
+    if preauth is None:
+        preauth = bool(PREAUTH_HOSTS.get(host))
     try:
         sock.settimeout(timeout)
-        code, headers = _request(sock, clean, 1)
+        first_auth = ""
+        if preauth and user:
+            first_auth = "Basic " + base64.b64encode(f"{user}:{pwd}".encode()).decode()
+            result["auth"] = "basic (sent first)"
+        code, headers = _request(sock, clean, 1, first_auth)
         if code == 401 and user:
             challenges = headers.get("www-authenticate", [])
             digest = next((c for c in challenges if c.lower().startswith("digest")), None)
@@ -136,7 +151,11 @@ def describe_detail(url: str, timeout: float = 4.0) -> dict:
         return done(kind, msg, code)
     except socket.timeout:
         return done(OTHER, f"{host}:{port} accepted the connection but didn't answer.")
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        return done(CLOSED, CLOSED_MSG.format(host=host))
     except Exception as e:
+        if "Not an RTSP reply: ''" in str(e):
+            return done(CLOSED, CLOSED_MSG.format(host=host))
         return done(OTHER, f"Unexpected reply from {host}:{port}: {e}")
     finally:
         sock.close()
@@ -174,6 +193,8 @@ class _Client:
         self.buf = b""
         self.cseq = 0
         self.challenge = None  # ("digest"|"basic", params)
+        if PREAUTH_HOSTS.get(self.host) and self.user:
+            self.challenge = ("basic", "")   # this device wants the login at once
 
     def _auth(self, method: str, uri: str) -> str:
         if not self.challenge or not self.user:
@@ -424,3 +445,35 @@ def sdp_param_prefix(sdp: str, codec: str) -> bytes:
     """Annex-B parameter sets from the SDP, to make a saved sample playable."""
     from app.core.rtp_capture import START, _sprop
     return b"".join(START + p for p in _sprop(sdp, codec))
+
+
+def alternative_urls(url: str) -> list:
+    """Other address forms of the same Hikvision stream: older DVR / NVR firmware
+    only knows /h264/chN/main|sub/av_stream; some newer ones the ISAPI path."""
+    m = re.match(r"^(rtsp://[^/]+)/Streaming/Channels/(\d+?)(0[12])/?(\?.*)?$", url, re.I)
+    if not m:
+        return []
+    base, ch, kind = m.group(1), int(m.group(2)), m.group(3)
+    sub = kind == "02"
+    return [f"{base}/h264/ch{ch}/{'sub' if sub else 'main'}/av_stream",
+            f"{base}/ISAPI/Streaming/channels/{ch}{kind}",
+            f"{base}/h264/ch{ch:02d}/{'sub' if sub else 'main'}/av_stream"]
+
+
+def find_working_url(url: str, timeout: float = 4.0):
+    """For a device that hangs up: try the login-first variant and other address
+    forms. Returns (working url or None, last describe result, tried list)."""
+    tried = []
+    host = urlsplit(url).hostname
+    for candidate in [url] + alternative_urls(url):
+        for preauth in (False, True):
+            d = describe_detail(candidate, timeout, preauth=preauth)
+            tried.append((candidate, preauth, d))
+            if d["kind"] in (OK, AUTH, NOT_FOUND, BUSY):
+                # The device answers this form: remember how, and use it.
+                if preauth:
+                    PREAUTH_HOSTS[host] = True
+                return (candidate if d["kind"] == OK else None), d, tried
+            if d["kind"] == UNREACHABLE:
+                return None, d, tried
+    return None, tried[-1][2], tried

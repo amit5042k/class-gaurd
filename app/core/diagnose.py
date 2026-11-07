@@ -178,6 +178,20 @@ def run_diagnosis(cam: Dict, stream_seconds: float = 6.0) -> str:
         lines.append(f"2. RTSP request: {d['message']} (code {d['code']}, login {d['auth']})")
         if d["media"]:
             lines.append(f"   Media offered: {', '.join(d['media'])}")
+        if d["kind"] == "closed":
+            from app.protocols.rtsp_diag import find_working_url
+            found, d2, tried = find_working_url(url)
+            for cand, pre, r in tried[1:]:
+                lines.append(f"   Tried {mask(cand, pwd)}{' (login first)' if pre else ''}: "
+                             f"{r['message'] if r['kind'] != OK else 'works'}")
+            if found:
+                url = found
+                lines.append(f"   This device answers on: {mask(found, pwd)}. ClassGuard uses "
+                             "it automatically.")
+                d = d2
+            else:
+                d = d2
+                lines += _hikvision_checks(cam)
         if d["kind"] != OK:
             conclusion = d["message"]
 
