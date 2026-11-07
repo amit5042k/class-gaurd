@@ -3,7 +3,7 @@
 ; Expects the PyInstaller output in dist\ClassGuard\ (run: pyinstaller classguard.spec)
 
 #ifndef AppVersion
-  #define AppVersion "2.3.1"
+  #define AppVersion "2.3.2"
 #endif
 
 [Setup]

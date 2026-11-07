@@ -1,7 +1,7 @@
 import cv2
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
+    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget
 )
@@ -56,11 +56,10 @@ class FaceEnrollment(QWidget):
         self.db = db
         self.fe = face_engine
         self._selected_pid = None
-        self._cap = None
+        self._feed = None              # CameraFeed while a picture source is on
         self._last_frame = None
         self._busy = False
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._update_preview)
+        self._cameras = []
         self._build_ui()
         self.refresh()
 
@@ -108,9 +107,17 @@ class FaceEnrollment(QWidget):
         self._preview = VideoCanvas("Select a person, then capture or choose a photo")
         self._preview.setMinimumSize(320, 240)
         rl.addWidget(self._preview, 1)
-        self._btn_cam = QPushButton("Start Webcam")
+        src = QHBoxLayout()
+        src.addWidget(QLabel("Picture from:"))
+        self._source = QComboBox()
+        self._source.setToolTip("This PC's webcam, or any CCTV camera: the person stands in "
+                                "front of it, about 1–2 m away")
+        self._source.addItem("Webcam on this PC", None)
+        src.addWidget(self._source, 1)
+        self._btn_cam = QPushButton("Start")
         self._btn_cam.setObjectName("secondary_btn")
         self._btn_cam.clicked.connect(self._toggle_camera)
+        src.addWidget(self._btn_cam)
         self._btn_snap = QPushButton("Capture && Enroll")
         self._btn_snap.setObjectName("primary_btn")
         self._btn_snap.clicked.connect(self._capture_enroll)
@@ -125,8 +132,8 @@ class FaceEnrollment(QWidget):
         tip.setStyleSheet("color:#777; font-size:11px;")
         self._status = QLabel("No person selected")
         self._status.setWordWrap(True)
-        for w in (self._btn_cam, self._btn_snap, self._btn_file, self._btn_clear,
-                  tip, self._status):
+        rl.addLayout(src)
+        for w in (self._btn_snap, self._btn_file, self._btn_clear, tip, self._status):
             rl.addWidget(w)
         splitter.addWidget(right)
         splitter.setSizes([600, 380])
@@ -183,7 +190,8 @@ class FaceEnrollment(QWidget):
 
     def _update_buttons(self):
         ok = self._selected_pid is not None and self.fe.recognition_available and not self._busy
-        self._btn_snap.setEnabled(ok and self._cap is not None)
+        self._btn_snap.setEnabled(ok and self._feed is not None
+                                  and self._feed.last_frame is not None)
         self._btn_file.setEnabled(ok)
         self._btn_clear.setEnabled(self._selected_pid is not None and not self._busy)
 
@@ -274,43 +282,81 @@ class FaceEnrollment(QWidget):
         self.refresh()
 
     # ------------------------------------------------------------ capture
+    def set_cameras(self, cameras):
+        """CCTV cameras offered as picture sources (besides the webcam)."""
+        self._cameras = list(cameras)
+        current = self._source.currentData()
+        self._source.blockSignals(True)
+        self._source.clear()
+        self._source.addItem("Webcam on this PC", None)
+        for c in self._cameras:
+            self._source.addItem(f"Camera: {c['name']}", c["id"])
+        idx = self._source.findData(current)
+        self._source.setCurrentIndex(max(0, idx))
+        self._source.blockSignals(False)
+
     def _toggle_camera(self):
-        if self._cap is not None:
+        if self._feed is not None:
             self._stop_camera()
             return
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            cap.release()
-            self._status.setText("No webcam found. Use 'Enroll from Photo File' instead.")
-            return
-        self._cap = cap
-        self._timer.start(40)
-        self._btn_cam.setText("Stop Webcam")
+        from app.core.camera_feed import CameraFeed
+        cid = self._source.currentData()
+        cam = next((c for c in self._cameras if c["id"] == cid), None)
+        source = {"kind": "camera", "camera": cam} if cam else {"kind": "webcam"}
+        feed = CameraFeed(source, self.fe)
+        feed.frame_ready.connect(self._show_frame)
+        feed.status.connect(self._status.setText)
+        feed.failed.connect(self._feed_failed)
+        self._feed = feed
+        self._source.setEnabled(False)
+        self._btn_cam.setText("Stop")
+        self._preview.clear_image("Connecting…")
+        feed.start()
         self._update_buttons()
 
+    def _feed_failed(self, message: str):
+        self._stop_camera()
+        self._status.setText(message)
+        self._preview.clear_image(message)
+
     def _stop_camera(self):
-        self._timer.stop()
-        if self._cap is not None:
-            self._cap.release()
-        self._cap = None
-        self._btn_cam.setText("Start Webcam")
+        feed, self._feed = self._feed, None
+        if feed is not None:
+            for sig in (feed.frame_ready, feed.status, feed.failed):
+                try:
+                    sig.disconnect()
+                except TypeError:
+                    pass
+            feed.stop()
+            feed.wait(200)
+            self._retired = getattr(self, "_retired", [])
+            if feed.isRunning():
+                self._retired.append(feed)
+                feed.finished.connect(lambda f=feed: f in self._retired and
+                                      self._retired.remove(f))
+        self._source.setEnabled(True)
+        self._btn_cam.setText("Start")
         self._update_buttons()
 
     def hideEvent(self, event):
         self._stop_camera()
         super().hideEvent(event)
 
-    def _update_preview(self):
-        if self._cap is None:
-            return
-        ok, frame = self._cap.read()
-        if ok:
-            self._last_frame = frame
-            self._preview.set_image(to_qimage(frame))
+    def _show_frame(self, frame):
+        self._preview.set_image(to_qimage(frame))
+        if not self._btn_snap.isEnabled():
+            self._update_buttons()
 
     def _capture_enroll(self):
-        if self._last_frame is not None:
-            self._enroll(self._last_frame.copy())
+        feed = self._feed
+        if feed is None or feed.last_frame is None:
+            return
+        frame = feed.last_frame.copy()
+        if self._source.currentData() is not None:
+            # CCTV picture: may show several people; enroll the biggest face.
+            from app.core.camera_feed import largest_face_crop
+            frame = largest_face_crop(frame, list(feed.boxes))
+        self._enroll(frame)
 
     def _enroll_from_file(self):
         path, _ = QFileDialog.getOpenFileName(

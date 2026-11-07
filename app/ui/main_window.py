@@ -220,6 +220,7 @@ class MainWindow(QMainWindow):
         self._p_expr.set_cameras(cameras)
         self._p_safety.set_cameras(cameras)
         self._p_track.set_cameras(cameras)
+        self._p_faces.set_cameras(cameras)
         self._p_rec.set_cameras(cameras)
         self.ai.set_cameras(cameras)
         self.recorder.set_cameras(cameras)
