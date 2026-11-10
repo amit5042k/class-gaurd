@@ -311,6 +311,12 @@ class RTPCapture:
                 if c.buf and c.buf[:1] != b"$":
                     i = c.buf.find(b"$")
                     head = c.buf if i < 0 else c.buf[:i]
+                    if c.buf.startswith(b"RTSP/"):
+                        # A reply: its end is the blank line, even if a header
+                        # (e.g. a login nonce) happens to contain '$'.
+                        end = c.buf.find(b"\r\n\r\n")
+                        head = c.buf[:end + 4] if end >= 0 else c.buf
+                        i = -1 if end < 0 else i
                     if b"\r\n\r\n" in head:            # e.g. keep-alive reply
                         end = head.index(b"\r\n\r\n") + 4
                         reply, c.buf = c.buf[:end], c.buf[end:]

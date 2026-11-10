@@ -93,7 +93,7 @@ class CameraFeed(QThread):
         from app.core.stream_manager import is_placeholder_frame, open_capture
         from app.core.av_capture import AVAILABLE
         cam = self.source["camera"]
-        url = enrollment_url(cam)
+        url = self._usable_url(cam)
         for backend in (["rtp"] if AVAILABLE else []) + ["opencv"]:
             if not self._running:
                 return None
@@ -111,6 +111,24 @@ class CameraFeed(QThread):
                     return cap
             cap.release()
         return None
+
+    @staticmethod
+    def _usable_url(cam: Dict) -> str:
+        """Main stream if the device answers for it; else another address form of
+        it (older DVRs); else the address Live View uses."""
+        url = enrollment_url(cam)
+        fallback = cam.get("rtsp_url") or url
+        if not str(url).startswith("rtsp") or url == fallback:
+            return url
+        try:
+            from app.protocols.rtsp_diag import CLOSED, OK, describe, find_working_url
+            kind, _ = describe(url, timeout=3)
+            if kind == CLOSED:
+                found, _d, _t = find_working_url(url, timeout=3)
+                return found or fallback
+            return url if kind == OK else fallback
+        except Exception:
+            return fallback
 
     def run(self):
         if self.source.get("kind") == "webcam":

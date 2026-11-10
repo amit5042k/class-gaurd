@@ -209,6 +209,7 @@ class VideoCell(QWidget):
         self.setStyleSheet("#video_cell{border:2px solid #ffd84a;}" if selected else "")
 
     def set_operator(self, can_operate: bool):
+        self._can_operate = can_operate
         self._b_rec.setVisible(can_operate)
 
     def _toggle_rec(self):
@@ -307,7 +308,7 @@ class VideoCell(QWidget):
         )
         menu.addAction("Take Snapshot").triggered.connect(
             lambda: self.snapshot_requested.emit(self.camera_id))
-        if self._b_rec.isVisible() or not self._tools.isVisible():
+        if getattr(self, "_can_operate", True):
             if self._manual:
                 menu.addAction("Stop manual recording").triggered.connect(
                     lambda: self.record_toggled.emit(self.camera_id, False))

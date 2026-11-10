@@ -2,9 +2,11 @@ import json
 import logging
 import os
 import sys
+import threading
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
+_save_lock = threading.Lock()
 
 _URL_BREAKING = "%@:/#? "
 
@@ -23,7 +25,7 @@ def resource_path(*parts: str) -> str:
 
 class Config:
     APP_NAME = "ClassGuard - Camera Management System"
-    VERSION = "2.3.3"
+    VERSION = "2.3.4"
 
     DATA_DIR = os.path.join(os.path.expanduser("~"), ".classguard")
     DB_PATH = os.path.join(DATA_DIR, "classguard.db")
@@ -163,9 +165,12 @@ class Config:
 
     @classmethod
     def save_settings(cls):
-        os.makedirs(cls.DATA_DIR, exist_ok=True)
-        data = {k: getattr(cls, k) for k in cls.PERSISTED_KEYS}
-        tmp = cls.SETTINGS_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, cls.SETTINGS_PATH)
+        # Called from the window and from camera threads (learned decoders):
+        # one writer at a time, or two could interleave and corrupt the file.
+        with _save_lock:
+            os.makedirs(cls.DATA_DIR, exist_ok=True)
+            data = {k: getattr(cls, k) for k in cls.PERSISTED_KEYS}
+            tmp = f"{cls.SETTINGS_PATH}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, cls.SETTINGS_PATH)

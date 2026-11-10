@@ -462,18 +462,23 @@ def alternative_urls(url: str) -> list:
 
 def find_working_url(url: str, timeout: float = 4.0):
     """For a device that hangs up: try the login-first variant and other address
-    forms. Returns (working url or None, last describe result, tried list)."""
+    forms. Returns (working url or None, most informative result, tried list)."""
     tried = []
     host = urlsplit(url).hostname
+    best = None                      # first answer that is not a hang-up
     for candidate in [url] + alternative_urls(url):
         for preauth in (False, True):
             d = describe_detail(candidate, timeout, preauth=preauth)
             tried.append((candidate, preauth, d))
-            if d["kind"] in (OK, AUTH, NOT_FOUND, BUSY):
-                # The device answers this form: remember how, and use it.
-                if preauth:
-                    PREAUTH_HOSTS[host] = True
-                return (candidate if d["kind"] == OK else None), d, tried
             if d["kind"] == UNREACHABLE:
                 return None, d, tried
-    return None, tried[-1][2], tried
+            if d["kind"] == CLOSED:
+                continue
+            if preauth:
+                PREAUTH_HOSTS[host] = True     # it only answers with the login sent first
+            if d["kind"] == OK:
+                return candidate, d, tried
+            if best is None or (best["kind"] == NOT_FOUND and d["kind"] != NOT_FOUND):
+                best = d                       # e.g. "wrong password" beats "no such path"
+            break                              # this form answers: no need for login-first
+    return None, best or tried[-1][2], tried

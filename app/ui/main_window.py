@@ -69,6 +69,9 @@ class MainWindow(QMainWindow):
         self.ai.start()
         self.recorder.start_cleanup()
         QTimer.singleShot(5000, self._purge_sightings)
+        self._purge_timer = QTimer(self)        # the app runs for weeks at a time
+        self._purge_timer.timeout.connect(self._purge_sightings)
+        self._purge_timer.start(6 * 3600 * 1000)
         self.apply_user(self.user)
         QTimer.singleShot(500, self._start_background_streams)
         if Config.AUTO_START_STREAMS:

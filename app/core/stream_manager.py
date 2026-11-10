@@ -205,6 +205,8 @@ class StreamThread(QThread):
         self._snapshot_ok = snapshot is not None
         self._snapshot_failures = 0
         self._last_display = 0.0
+        self._deliver_lock = threading.Lock()
+        self._video_started = False
 
     def _order(self) -> List[str]:
         """Decoders to try, the one this camera started with first."""
@@ -349,6 +351,8 @@ class StreamThread(QThread):
                             full_seen = True
                         if not got_frame:
                             got_frame = True
+                            with self._deliver_lock:
+                                self._video_started = True   # the preview still is obsolete
                             failures, reason, delay = 0, "", self._base_delay
                             label = "Connected" + (" (UDP)" if self._current == "udp"
                                                    and self._backend != "rtp" else "") \
@@ -380,7 +384,9 @@ class StreamThread(QThread):
                             logger.warning("Camera %s: opened over %s but no frames",
                                            self.camera_id, tried)
                             delay = self._base_delay  # retry the next combination promptly
-                            if failures >= 2 and self._snapshot_ok:
+                            # Stills once every decoder had its turn (or after 3 tries).
+                            all_tried = self._backend == self._order()[0]
+                            if self._snapshot_ok and (all_tried or failures >= 3):
                                 go_snapshot = True
             except _Retry:
                 pass
@@ -400,6 +406,10 @@ class StreamThread(QThread):
                 delay = min(delay * 2, 30)
 
     def _deliver(self, frame, force_display: bool = False):
+        with self._deliver_lock:
+            self._deliver_locked(frame, force_display)
+
+    def _deliver_locked(self, frame, force_display: bool = False):
         self.last_frame = frame
         for listener in list(self._listeners):
             try:
@@ -412,13 +422,19 @@ class StreamThread(QThread):
             self.frame_ready.emit(self.camera_id, to_qimage(frame, DISPLAY_MAX_WIDTH))
 
     def _show_preview(self):
-        """Show a still picture from the device at once, while video connects."""
-        if not self._snapshot_ok:
-            return
+        """Show a still picture from the device while video connects. Fetched in
+        parallel: a device whose web port doesn't answer must not delay video."""
+        if self._snapshot_ok:
+            threading.Thread(target=self._preview_worker, daemon=True).start()
+
+    def _preview_worker(self):
         img = self._grab_snapshot()
-        if img is not None and self._running:
-            self._deliver(img, force_display=True)
-            self.status_changed.emit(self.camera_id, False, PREVIEW_MSG)
+        if img is None:
+            return
+        with self._deliver_lock:
+            if self._running and not self._video_started:
+                self._deliver_locked(img, force_display=True)
+                self.status_changed.emit(self.camera_id, False, PREVIEW_MSG)
 
     def _grab_snapshot(self):
         try:

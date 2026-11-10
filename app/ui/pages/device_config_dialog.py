@@ -190,10 +190,12 @@ class DeviceConfigDialog(QDialog):
         self._fill(self.bitrate_type, opts.get("bitrate_type") or ["VBR", "CBR"],
                    video["bitrate_type"])
         self.bitrate.setValue(int(video["bitrate"] or 512))
-        fps = opts.get("fps") or FPS_DEFAULT
+        fps = list(opts.get("fps") or FPS_DEFAULT)
+        if not video["fps"]:
+            fps.insert(0, 0)            # the device is set to its full frame rate
         self._fill(self.fps, fps, video["fps"] if video["fps"] in fps else
-                   (int(video["fps"]) if video["fps"] else None),
-                   label=lambda f: f"{f:g} fps")
+                   (int(video["fps"]) if video["fps"] else 0),
+                   label=lambda f: f"{f:g} fps" if f else "Full frame rate")
         self.gop.setValue(int(video["gop"] or 50))
         qualities = list(HIK_QUALITY) if self.dev.get("brand") == "Hikvision" else \
             [str(i) for i in range(1, 7)]
@@ -238,8 +240,9 @@ class DeviceConfigDialog(QDialog):
             out["bitrate_type"] = self.bitrate_type.currentData()
         if self.bitrate.value() != v.get("bitrate"):
             out["bitrate"] = self.bitrate.value()
-        if self.fps.currentData() and float(self.fps.currentData()) != float(v.get("fps") or 0):
-            out["fps"] = self.fps.currentData()
+        fps = self.fps.currentData()
+        if fps is not None and float(fps) != float(v.get("fps") or 0):
+            out["fps"] = fps
         if self.gop.value() != v.get("gop"):
             out["gop"] = self.gop.value()
         if self.quality.currentData() != v.get("quality"):
